@@ -1,31 +1,34 @@
-# ==============================================================================
-# File: monitor.R
-# Description: California News Monitoring Script (Korean-related Incidents)
-#              - Scrapes Google News (US), Joongang Ilbo, Radio Korea, Hankook Ilbo
-#              - Uses Gemini 2.0 Flash for analysis
-#              - Sends Telegram alerts for Korean-related incidents
-# ==============================================================================
+---
+title: "Consular Protection Monitor"
+output: html_document
+---
 
-# 1. Install and Load Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# 1. 라이브러리 로드 (설치 안 된 경우 자동 설치)
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(httr, jsonlite, tidyRSS, tidyverse, telegram.bot, rvest, lubridate, purrr)
 
-# 2. Retrieve Secrets from Environment Variables (GitHub Secrets)
-GEMINI_API_KEY     <- Sys.getenv("AIzaSyBvsjTSTiztxmiOS4ibYSkJ6DtqADVTD6I")
-TELEGRAM_BOT_TOKEN <- Sys.getenv("8392862897:AAEVnKxYN-IGoFPeH1MRMEyTLB_xC8M7m_I")
-MY_CHAT_ID         <- Sys.getenv("5965248912")
+# ==============================================================================
+# 2. 보안 설정: GitHub Secrets에서 비밀번호 가져오기
+# (주의: 이 파일에 절대 진짜 키를 적지 마세요!)
+# ==============================================================================
+GEMINI_API_KEY     <- Sys.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
+MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 
-# [UPDATED] Set Model Name to Gemini 2.0 Flash
-MODEL_NAME         <- "gemini-2.0-flash"
+# [설정] 사용할 모델명 (요청하신 2.5 Flash)
+MODEL_NAME         <- "gemini-2.5-flash"
 
-# Initialize Telegram Bot
+# 텔레그램 봇 초기화
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 # ==============================================================================
-# 3. Helper Functions
+# 3. 핵심 함수 정의
 # ==============================================================================
 
-# [Function 1] Direct Gemini API Call (Manual Request to avoid package errors)
+# [함수 1] 제미나이 직접 호출 (수동 API 요청)
 ask_gemini_direct <- function(prompt) {
   url <- paste0("https://generativelanguage.googleapis.com/v1beta/models/", MODEL_NAME, ":generateContent?key=", GEMINI_API_KEY)
   
@@ -48,58 +51,50 @@ ask_gemini_direct <- function(prompt) {
       return(NULL)
     }
   }, error = function(e) {
-    print("⚠️ Failed to communicate with Gemini API")
+    print("⚠️ 제미나이 통신 실패")
     return(NULL)
   })
 }
 
-# [Function 2] Scrape Full Article Text
-# Fetches the content of <p> tags to provide more context than just the title.
+# [함수 2] 뉴스 본문 스크래핑 (제목만 보는 한계 극복)
 get_full_text <- function(link) {
   tryCatch({
-    # Set timeout option to prevent hanging
-    page <- read_html(link, options = "NO_ERROR") 
-    
-    # Extract text from paragraph tags
+    # 타임아웃 옵션 추가하여 멈춤 방지
+    page <- read_html(link, options = "NO_ERROR")
+    # <p> 태그만 긁어오기
     text <- page %>% html_nodes("p") %>% html_text() %>% paste(collapse = " ")
     
-    # Return NULL if text is too short, otherwise return first 2000 chars
+    # 너무 짧으면(봇 차단 등) NULL 반환, 길면 2000자만 자름
     if (nchar(text) < 100) return(NULL)
     return(substr(text, 1, 2000))
-    
   }, error = function(e) {
-    return(NULL) # Fail silently and use summary instead
+    return(NULL) 
   })
 }
 
-# [Function 3] Fetch News from Multiple Sources (English + Korean)
+# [함수 3] 뉴스 수집 (영어 + 한국어 4대 소스)
 fetch_news <- function() {
-  # 1. Google News US (California Accidents/Disasters - English)
+  # 1. Google News US (영어)
   url_google_us <- "https://news.google.com/rss/search?q=California+(accident+OR+disaster+OR+shooting+OR+crash)+when:1h&ceid=US:en&hl=en-US&gl=US"
-  
-  # 2. Korea Daily (Joongang Ilbo - LA Society Section)
+  # 2. 미주 중앙일보 (LA 사회)
   url_joongang <- "https://rss.koreadaily.com/la/society.xml"
-  
-  # 3. Radio Korea (LA Local News)
+  # 3. 라디오코리아 (로컬 뉴스)
   url_radiokorea <- "https://www.radiokorea.com/rss/news_news.xml"
-  
-  # 4. Korea Times (Hankook Ilbo - via Google Search query)
+  # 4. 미주 한국일보 (구글 우회)
   url_hankook <- "https://news.google.com/rss/search?q=site:koreatimes.com+California+(사건+OR+사고+OR+화재+OR+총격)+when:1h&ceid=KR:ko&hl=ko&gl=KR"
 
-  # Inner helper to fetch safely
-  safe_fetch <- function(url, source_name) {
+  safe_fetch <- function(url, src) {
     tryCatch({
       feed <- tidyRSS::tidyfeed(url)
       if (nrow(feed) > 0) {
         feed %>% 
           select(item_title, item_link, item_description, item_pub_date) %>% 
-          mutate(source = source_name) %>% 
-          head(5) # Limit to latest 5 items per source
+          mutate(source = src) %>% 
+          head(5) # 소스당 최신 5개
       } else { NULL }
     }, error = function(e) { return(NULL) })
   }
   
-  # Combine all sources
   bind_rows(
     safe_fetch(url_google_us, "Google_US"),
     safe_fetch(url_joongang, "Joongang_Ilbo"),
@@ -109,106 +104,93 @@ fetch_news <- function() {
 }
 
 # ==============================================================================
-# 4. Main Execution Logic
+# 4. 메인 실행 로직
 # ==============================================================================
+print(paste("📡 [GitHub Action]", Sys.time(), "뉴스 체크 시작 (Model:", MODEL_NAME, ")"))
 
-run_monitor_once <- function() {
-  print(paste("📡 [GitHub Action]", Sys.time(), "Starting News Scan with", MODEL_NAME, "..."))
+news_data <- fetch_news()
+
+if (is.null(news_data) || nrow(news_data) == 0) {
+  print("   -> 수집된 뉴스가 없습니다.")
+} else {
   
-  news_data <- fetch_news()
-  
-  if (is.null(news_data) || nrow(news_data) == 0) {
-    print("   -> No news found from RSS feeds.")
-    return()
-  }
-  
-  # [IMPORTANT] Time Filter: Keep articles published within the last 40 minutes.
-  # This prevents duplicate alerts since the script runs every 30 minutes.
+  # [중요] 최근 40분 이내 기사만 필터링 (중복 알림 방지)
   current_time <- Sys.time()
-  
-  # Parse dates and filter
   news_data <- news_data %>%
     mutate(pub_date_parsed = ymd_hms(item_pub_date)) %>%
     filter(pub_date_parsed >= (current_time - minutes(40)))
   
-  if (nrow(news_data) == 0) {
-    print("   -> No new articles in the last 40 minutes.")
-    return()
-  } else {
-    print(paste("   -> Found", nrow(news_data), "new articles. Analyzing..."))
-  }
-
-  # Loop through each article
-  for(i in 1:nrow(news_data)) {
-    title <- news_data$item_title[i]
-    link  <- news_data$item_link[i]
-    desc  <- news_data$item_description[i]
-    src   <- news_data$source[i]
+  if (nrow(news_data) > 0) {
+    print(paste("   ->", nrow(news_data), "개의 최신 기사를 분석합니다."))
     
-    # Attempt to scrape full text
-    full_text <- get_full_text(link)
-    
-    if (is.null(full_text)) {
-      content_source <- gsub("<.*?>", "", desc) # Clean HTML tags
-      source_type <- "Summary Only"
-    } else {
-      content_source <- full_text
-      source_type <- "Full Text Scraped"
-    }
-    
-    # Construct Prompt for Gemini
-    prompt <- paste0(
-      "Analyze this news item.\n",
-      "Source: ", src, "\n",
-      "Title: ", title, "\n",
-      "Content (", source_type, "): ", content_source, "\n\n",
+    for(i in 1:nrow(news_data)) {
+      title <- news_data$item_title[i]
+      link  <- news_data$item_link[i]
+      desc  <- news_data$item_description[i]
+      src   <- news_data$source[i]
       
-      "YOUR TASK: Act as a Crisis Monitoring Officer. Identify negative incidents (crime, accident, disaster) involving Koreans/Korean-Americans in California.\n",
+      # 본문 긁기 시도
+      full_text <- get_full_text(link)
       
-      "CRITERIA:\n",
-      "1. IF Source is 'Joongang_Ilbo', 'Radio_Korea', or 'Hankook_Ilbo':\n",
-      "   -> It is ALREADY Korean-related. Just check if it is a negative incident (Ignore ads, politics, festivals).\n",
-      "2. IF Source is 'Google_US':\n",
-      "   -> Look for Korean names (Kim, Lee, Park, Choi), Locations (Koreatown, Zion Market, H-Mart), or Business types (Liquor store, Dry cleaner, Donut shop).\n\n",
+      if (is.null(full_text)) {
+        content_src <- gsub("<.*?>", "", desc) # HTML 태그 제거
+        source_type <- "Summary Only"
+      } else {
+        content_src <- full_text
+        source_type <- "Full Text Scraped"
+      }
       
-      "OUTPUT FORMAT (Strictly):\n",
-      "'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short explanation] | Summary: [1 sentence in Korean]'"
-    )
-    
-    # Call Gemini API (Sleep 4s to respect rate limits)
-    Sys.sleep(4)
-    analysis <- ask_gemini_direct(prompt)
-    
-    # Process Result
-    if (!is.null(analysis) && str_detect(analysis, "Korean: Yes")) {
-      
-      # Extract details using Regex
-      summary_text <- str_extract(analysis, "(?<=Summary: ).*")
-      reason_text  <- str_extract(analysis, "(?<=Reason: ).*(?=\\| Summary)")
-      
-      # Create Alert Message
-      alert_msg <- paste0(
-        "🚨 [긴급] 한인 관련 사건 감지!\n\n",
-        "📰 Source: ", src, "\n",
-        "📌 Title: ", title, "\n",
-        "🧐 Reason: ", reason_text, "\n",
-        "📝 Summary: ", summary_text, "\n",
-        "🔗 Link: ", link
+      # 제미나이 프롬프트 (지리적/업종 프로파일링 포함)
+      prompt <- paste0(
+        "Analyze this news.\n",
+        "Source: ", src, "\n",
+        "Title: ", title, "\n",
+        "Content (", source_type, "): ", content_src, "\n\n",
+        
+        "YOUR TASK: Act as a Crisis Monitoring Officer. Identify negative incidents (crime, accident, disaster) involving Koreans/Korean-Americans in California.\n",
+        
+        "CRITERIA:\n",
+        "1. IF Source is 'Joongang_Ilbo', 'Radio_Korea', or 'Hankook_Ilbo':\n",
+        "   -> It is ALREADY Korean-related. Just check if it is a negative incident (Ignore ads, politics, festivals).\n",
+        "2. IF Source is 'Google_US':\n",
+        "   -> Look for Korean names (Kim, Lee, Park, Choi), Locations (Koreatown, Zion Market, H-Mart), or Business types (Liquor store, Dry cleaner, Donut shop).\n\n",
+        
+        "OUTPUT FORMAT (Strictly):\n",
+        "'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short explanation] | Summary: [1 sentence in Korean]'"
       )
       
-      # Send Telegram Message
-      tryCatch({
-        bot$sendMessage(chat_id = MY_CHAT_ID, text = alert_msg)
-        print(paste("✅ Alert Sent:", title))
-      }, error = function(e) {
-        print(paste("❌ Failed to send Telegram message for:", title))
-      })
+      # API 호출 (속도 조절 4초)
+      Sys.sleep(4)
+      analysis <- ask_gemini_direct(prompt)
       
-    } else {
-      print(paste("⚪ Irrelevant:", title))
+      # 결과 처리 및 알림 발송
+      if (!is.null(analysis) && str_detect(analysis, "Korean: Yes")) {
+        
+        summary <- str_extract(analysis, "(?<=Summary: ).*")
+        reason  <- str_extract(analysis, "(?<=Reason: ).*(?=\\| Summary)")
+        
+        msg <- paste0(
+          "🚨 [긴급] 한인 관련 사건 감지!\n\n",
+          "📰 출처: ", src, "\n",
+          "📌 제목: ", title, "\n",
+          "🧐 이유: ", reason, "\n",
+          "📝 요약: ", summary, "\n",
+          "🔗 링크: ", link
+        )
+        
+        tryCatch({
+          bot$sendMessage(chat_id = MY_CHAT_ID, text = msg)
+          print(paste("✅ 알림 전송 완료:", title))
+        }, error = function(e) {
+          print(paste("❌ 텔레그램 전송 실패:", title))
+        })
+        
+      } else {
+        print(paste("⚪ 관련 없음:", title))
+      }
     }
+  } else {
+    print("   -> 최근 40분 내 새로운 기사가 없습니다.")
   }
 }
 
-# Execute Main Logic
-run_monitor_once()
