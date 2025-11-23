@@ -103,18 +103,26 @@ fetch_news <- function() {
   )
 }
 
+
+
 # ==============================================================================
-# 4. 메인 실행 로직
+# 4. 메인 실행 로직 (생존 신고 기능 추가됨)
 # ==============================================================================
 print(paste("📡 [GitHub Action]", Sys.time(), "뉴스 체크 시작 (Model:", MODEL_NAME, ")"))
 
 news_data <- fetch_news()
 
+# 알림 보낸 횟수 카운트 (초기화)
+alert_count <- 0
+
 if (is.null(news_data) || nrow(news_data) == 0) {
   print("   -> 수집된 뉴스가 없습니다.")
+  # 뉴스 자체가 없어도 생존 신고 발송
+  try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [점검] 수집된 새 뉴스가 없습니다. (시스템 정상)"))
+  
 } else {
   
-  # [중요] 최근 40분 이내 기사만 필터링 (중복 알림 방지)
+  # [중요] 최근 40분 이내 기사만 필터링
   current_time <- Sys.time()
   news_data <- news_data %>%
     mutate(pub_date_parsed = ymd_hms(item_pub_date)) %>%
@@ -124,73 +132,46 @@ if (is.null(news_data) || nrow(news_data) == 0) {
     print(paste("   ->", nrow(news_data), "개의 최신 기사를 분석합니다."))
     
     for(i in 1:nrow(news_data)) {
-      title <- news_data$item_title[i]
-      link  <- news_data$item_link[i]
-      desc  <- news_data$item_description[i]
-      src   <- news_data$source[i]
+      title <- news_data$item_title[i]; link <- news_data$item_link[i]; desc <- news_data$item_description[i]; src <- news_data$source[i]
       
       # 본문 긁기 시도
       full_text <- get_full_text(link)
+      content_src <- if(is.null(full_text)) gsub("<.*?>", "", desc) else full_text
       
-      if (is.null(full_text)) {
-        content_src <- gsub("<.*?>", "", desc) # HTML 태그 제거
-        source_type <- "Summary Only"
-      } else {
-        content_src <- full_text
-        source_type <- "Full Text Scraped"
-      }
-      
-      # 제미나이 프롬프트 (지리적/업종 프로파일링 포함)
+      # 프롬프트
       prompt <- paste0(
-        "Analyze this news.\n",
-        "Source: ", src, "\n",
-        "Title: ", title, "\n",
-        "Content (", source_type, "): ", content_src, "\n\n",
-        
-        "YOUR TASK: Act as a Crisis Monitoring Officer. Identify negative incidents (crime, accident, disaster) involving Koreans/Korean-Americans in California.\n",
-        
-        "CRITERIA:\n",
-        "1. IF Source is 'Joongang_Ilbo', 'Radio_Korea', or 'Hankook_Ilbo':\n",
-        "   -> It is ALREADY Korean-related. Just check if it is a negative incident (Ignore ads, politics, festivals).\n",
-        "2. IF Source is 'Google_US':\n",
-        "   -> Look for Korean names (Kim, Lee, Park, Choi), Locations (Koreatown, Zion Market, H-Mart), or Business types (Liquor store, Dry cleaner, Donut shop).\n\n",
-        
-        "OUTPUT FORMAT (Strictly):\n",
-        "'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short explanation] | Summary: [1 sentence in Korean]'"
+        "Analyze this news.\n Source: ", src, "\n Title: ", title, "\n Content: ", content_src, "\n\n",
+        "TASK: Identify negative incidents (crime, accident, disaster) involving Koreans in California.\n",
+        "CRITERIA:\n 1. Korean Media: Check if negative incident.\n 2. Google US: Check names/locations/businesses.\n",
+        "OUTPUT: 'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short logic] | Summary: [1 sentence Korean]'"
       )
       
-      # API 호출 (속도 조절 4초)
       Sys.sleep(4)
       analysis <- ask_gemini_direct(prompt)
       
-      # 결과 처리 및 알림 발송
+      # 분석 결과 처리
       if (!is.null(analysis) && str_detect(analysis, "Korean: Yes")) {
-        
         summary <- str_extract(analysis, "(?<=Summary: ).*")
-        reason  <- str_extract(analysis, "(?<=Reason: ).*(?=\\| Summary)")
-        
-        msg <- paste0(
-          "🚨 [긴급] 한인 관련 사건 감지!\n\n",
-          "📰 출처: ", src, "\n",
-          "📌 제목: ", title, "\n",
-          "🧐 이유: ", reason, "\n",
-          "📝 요약: ", summary, "\n",
-          "🔗 링크: ", link
-        )
+        reason <- str_extract(analysis, "(?<=Reason: ).*(?=\\| Summary)")
+        msg <- paste0("🚨 [긴급] 한인 관련 사건!\n\n📰 ", src, "\n📌 ", title, "\n🧐 ", reason, "\n📝 ", summary, "\n🔗 ", link)
         
         tryCatch({
           bot$sendMessage(chat_id = MY_CHAT_ID, text = msg)
-          print(paste("✅ 알림 전송 완료:", title))
-        }, error = function(e) {
-          print(paste("❌ 텔레그램 전송 실패:", title))
-        })
-        
-      } else {
-        print(paste("⚪ 관련 없음:", title))
+          print(paste("✅ 알림 전송:", title))
+          alert_count <- alert_count + 1  # 카운트 증가
+        }, error = function(e) { print("전송 실패") })
       }
     }
+    
+    # [추가된 로직] 루프가 다 끝났는데 보낸 알림이 0개라면? -> '이상 없음' 보고
+    if (alert_count == 0) {
+      safe_msg <- paste0("✅ [점검] 최근 40분간 ", nrow(news_data), "건의 뉴스를 확인했으나, 한인 관련 특이사항이 없습니다.")
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = safe_msg))
+    }
+
   } else {
     print("   -> 최근 40분 내 새로운 기사가 없습니다.")
+    # 기사는 없지만 코드는 돌았다는 생존 신고
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [점검] 최근 40분 내 발생한 새 뉴스가 없습니다."))
   }
 }
-
