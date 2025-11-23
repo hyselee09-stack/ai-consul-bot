@@ -1,0 +1,37 @@
+name: Consular Protection Monitor
+
+on:
+  schedule:
+    # 매시 5분, 35분마다 실행 (30분 간격)
+    - cron: '5,35 * * * *'
+  workflow_dispatch: # 수동 실행 버튼 (테스트용)
+
+jobs:
+  run-monitor-rmd:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        
+      # R Markdown 렌더링을 위해 Pandoc 설치 (필수)
+      - name: Setup Pandoc
+        uses: r-lib/actions/setup-pandoc@v2
+        
+      - name: Install Packages
+        # 필요한 패키지들을 클라우드 컴퓨터에 설치
+        run: |
+          install.packages(c("rmarkdown", "pacman", "httr", "jsonlite", "tidyRSS", "tidyverse", "telegram.bot", "rvest", "lubridate", "purrr"), repos = "https://cloud.r-project.org")
+        shell: Rscript {0}
+        
+      - name: Run Monitor Rmd
+        # 깃허브 금고(Secrets)에서 키를 꺼내서 R에 전달
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+        # Rmd 파일을 실행(렌더링)하는 명령어
+        run: Rscript -e "rmarkdown::render('consular_protection_monitor_ca_usa.Rmd')"
