@@ -1,0 +1,214 @@
+# ==============================================================================
+# File: monitor.R
+# Description: California News Monitoring Script (Korean-related Incidents)
+#              - Scrapes Google News (US), Joongang Ilbo, Radio Korea, Hankook Ilbo
+#              - Uses Gemini 2.0 Flash for analysis
+#              - Sends Telegram alerts for Korean-related incidents
+# ==============================================================================
+
+# 1. Install and Load Libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(httr, jsonlite, tidyRSS, tidyverse, telegram.bot, rvest, lubridate, purrr)
+
+# 2. Retrieve Secrets from Environment Variables (GitHub Secrets)
+GEMINI_API_KEY     <- Sys.getenv("AIzaSyBvsjTSTiztxmiOS4ibYSkJ6DtqADVTD6I")
+TELEGRAM_BOT_TOKEN <- Sys.getenv("8392862897:AAEVnKxYN-IGoFPeH1MRMEyTLB_xC8M7m_I")
+MY_CHAT_ID         <- Sys.getenv("5965248912")
+
+# [UPDATED] Set Model Name to Gemini 2.0 Flash
+MODEL_NAME         <- "gemini-2.0-flash"
+
+# Initialize Telegram Bot
+bot <- Bot(token = TELEGRAM_BOT_TOKEN)
+
+# ==============================================================================
+# 3. Helper Functions
+# ==============================================================================
+
+# [Function 1] Direct Gemini API Call (Manual Request to avoid package errors)
+ask_gemini_direct <- function(prompt) {
+  url <- paste0("https://generativelanguage.googleapis.com/v1beta/models/", MODEL_NAME, ":generateContent?key=", GEMINI_API_KEY)
+  
+  body_data <- list(
+    contents = list(list(parts = list(list(text = prompt))))
+  )
+  
+  tryCatch({
+    response <- POST(
+      url, 
+      add_headers("Content-Type" = "application/json"), 
+      body = toJSON(body_data, auto_unbox = TRUE)
+    )
+    
+    if (status_code(response) == 200) {
+      result_json <- fromJSON(content(response, "text", encoding = "UTF-8"))
+      return(result_json$candidates$content$parts[[1]]$text)
+    } else {
+      print(paste("⚠️ API Error Code:", status_code(response)))
+      return(NULL)
+    }
+  }, error = function(e) {
+    print("⚠️ Failed to communicate with Gemini API")
+    return(NULL)
+  })
+}
+
+# [Function 2] Scrape Full Article Text
+# Fetches the content of <p> tags to provide more context than just the title.
+get_full_text <- function(link) {
+  tryCatch({
+    # Set timeout option to prevent hanging
+    page <- read_html(link, options = "NO_ERROR") 
+    
+    # Extract text from paragraph tags
+    text <- page %>% html_nodes("p") %>% html_text() %>% paste(collapse = " ")
+    
+    # Return NULL if text is too short, otherwise return first 2000 chars
+    if (nchar(text) < 100) return(NULL)
+    return(substr(text, 1, 2000))
+    
+  }, error = function(e) {
+    return(NULL) # Fail silently and use summary instead
+  })
+}
+
+# [Function 3] Fetch News from Multiple Sources (English + Korean)
+fetch_news <- function() {
+  # 1. Google News US (California Accidents/Disasters - English)
+  url_google_us <- "https://news.google.com/rss/search?q=California+(accident+OR+disaster+OR+shooting+OR+crash)+when:1h&ceid=US:en&hl=en-US&gl=US"
+  
+  # 2. Korea Daily (Joongang Ilbo - LA Society Section)
+  url_joongang <- "https://rss.koreadaily.com/la/society.xml"
+  
+  # 3. Radio Korea (LA Local News)
+  url_radiokorea <- "https://www.radiokorea.com/rss/news_news.xml"
+  
+  # 4. Korea Times (Hankook Ilbo - via Google Search query)
+  url_hankook <- "https://news.google.com/rss/search?q=site:koreatimes.com+California+(사건+OR+사고+OR+화재+OR+총격)+when:1h&ceid=KR:ko&hl=ko&gl=KR"
+
+  # Inner helper to fetch safely
+  safe_fetch <- function(url, source_name) {
+    tryCatch({
+      feed <- tidyRSS::tidyfeed(url)
+      if (nrow(feed) > 0) {
+        feed %>% 
+          select(item_title, item_link, item_description, item_pub_date) %>% 
+          mutate(source = source_name) %>% 
+          head(5) # Limit to latest 5 items per source
+      } else { NULL }
+    }, error = function(e) { return(NULL) })
+  }
+  
+  # Combine all sources
+  bind_rows(
+    safe_fetch(url_google_us, "Google_US"),
+    safe_fetch(url_joongang, "Joongang_Ilbo"),
+    safe_fetch(url_radiokorea, "Radio_Korea"),
+    safe_fetch(url_hankook, "Hankook_Ilbo")
+  )
+}
+
+# ==============================================================================
+# 4. Main Execution Logic
+# ==============================================================================
+
+run_monitor_once <- function() {
+  print(paste("📡 [GitHub Action]", Sys.time(), "Starting News Scan with", MODEL_NAME, "..."))
+  
+  news_data <- fetch_news()
+  
+  if (is.null(news_data) || nrow(news_data) == 0) {
+    print("   -> No news found from RSS feeds.")
+    return()
+  }
+  
+  # [IMPORTANT] Time Filter: Keep articles published within the last 40 minutes.
+  # This prevents duplicate alerts since the script runs every 30 minutes.
+  current_time <- Sys.time()
+  
+  # Parse dates and filter
+  news_data <- news_data %>%
+    mutate(pub_date_parsed = ymd_hms(item_pub_date)) %>%
+    filter(pub_date_parsed >= (current_time - minutes(40)))
+  
+  if (nrow(news_data) == 0) {
+    print("   -> No new articles in the last 40 minutes.")
+    return()
+  } else {
+    print(paste("   -> Found", nrow(news_data), "new articles. Analyzing..."))
+  }
+
+  # Loop through each article
+  for(i in 1:nrow(news_data)) {
+    title <- news_data$item_title[i]
+    link  <- news_data$item_link[i]
+    desc  <- news_data$item_description[i]
+    src   <- news_data$source[i]
+    
+    # Attempt to scrape full text
+    full_text <- get_full_text(link)
+    
+    if (is.null(full_text)) {
+      content_source <- gsub("<.*?>", "", desc) # Clean HTML tags
+      source_type <- "Summary Only"
+    } else {
+      content_source <- full_text
+      source_type <- "Full Text Scraped"
+    }
+    
+    # Construct Prompt for Gemini
+    prompt <- paste0(
+      "Analyze this news item.\n",
+      "Source: ", src, "\n",
+      "Title: ", title, "\n",
+      "Content (", source_type, "): ", content_source, "\n\n",
+      
+      "YOUR TASK: Act as a Crisis Monitoring Officer. Identify negative incidents (crime, accident, disaster) involving Koreans/Korean-Americans in California.\n",
+      
+      "CRITERIA:\n",
+      "1. IF Source is 'Joongang_Ilbo', 'Radio_Korea', or 'Hankook_Ilbo':\n",
+      "   -> It is ALREADY Korean-related. Just check if it is a negative incident (Ignore ads, politics, festivals).\n",
+      "2. IF Source is 'Google_US':\n",
+      "   -> Look for Korean names (Kim, Lee, Park, Choi), Locations (Koreatown, Zion Market, H-Mart), or Business types (Liquor store, Dry cleaner, Donut shop).\n\n",
+      
+      "OUTPUT FORMAT (Strictly):\n",
+      "'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short explanation] | Summary: [1 sentence in Korean]'"
+    )
+    
+    # Call Gemini API (Sleep 4s to respect rate limits)
+    Sys.sleep(4)
+    analysis <- ask_gemini_direct(prompt)
+    
+    # Process Result
+    if (!is.null(analysis) && str_detect(analysis, "Korean: Yes")) {
+      
+      # Extract details using Regex
+      summary_text <- str_extract(analysis, "(?<=Summary: ).*")
+      reason_text  <- str_extract(analysis, "(?<=Reason: ).*(?=\\| Summary)")
+      
+      # Create Alert Message
+      alert_msg <- paste0(
+        "🚨 [긴급] 한인 관련 사건 감지!\n\n",
+        "📰 Source: ", src, "\n",
+        "📌 Title: ", title, "\n",
+        "🧐 Reason: ", reason_text, "\n",
+        "📝 Summary: ", summary_text, "\n",
+        "🔗 Link: ", link
+      )
+      
+      # Send Telegram Message
+      tryCatch({
+        bot$sendMessage(chat_id = MY_CHAT_ID, text = alert_msg)
+        print(paste("✅ Alert Sent:", title))
+      }, error = function(e) {
+        print(paste("❌ Failed to send Telegram message for:", title))
+      })
+      
+    } else {
+      print(paste("⚪ Irrelevant:", title))
+    }
+  }
+}
+
+# Execute Main Logic
+run_monitor_once()
