@@ -1,32 +1,56 @@
-name: Disaster Monitor Schedule
+name: 🔥 Disaster Monitor Schedule
 
 on:
   schedule:
+    # Run at minute 20 and 50 of every hour
     - cron: '20,50 * * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Manual trigger button
 
 jobs:
   run-disaster-monitor:
     runs-on: ubuntu-latest
     
+    # [1] Environment Variables: Set custom library path for caching
+    env:
+      R_LIBS_USER: ./R/library
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+
     steps:
       - uses: actions/checkout@v3
+      
       - uses: r-lib/actions/setup-r@v2
+      
       - uses: r-lib/actions/setup-pandoc@v2
       
-      - name: Install Linux Deps
+      # Install Linux System Dependencies (Required for tidyverse, curl, etc.)
+      - name: Install Linux System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
         
+      # [2] Cache Configuration: Restore packages from cache if key matches
+      - name: Cache R Packages
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          # Key: OS + content of YAML files (re-cache if workflow changes)
+          key: ${{ runner.os }}-r-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-r-
+
+      # [3] Install Packages: Installs into the cached directory
       - name: Install R Packages
         run: |
-          install.packages(c("rmarkdown", "pacman", "httr", "jsonlite", "tidyRSS", "tidyverse", "telegram.bot", "rvest", "lubridate", "purrr"), repos = "https://cloud.r-project.org")
+          # Create directory for cached libraries
+          dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)
+          
+          # Install packages to the custom library path
+          install.packages(c("rmarkdown", "pacman", "httr", "jsonlite", "tidyRSS", "tidyverse", "telegram.bot", "rvest", "lubridate", "purrr"), 
+                           repos = "https://cloud.r-project.org", 
+                           lib = Sys.getenv("R_LIBS_USER"))
         shell: Rscript {0}
         
-      - name: Run Disaster Monitor
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+      - name: Run Disaster Monitor Script
         run: Rscript -e "rmarkdown::render('major_disaster_monitor_sw_usa.Rmd')"
