@@ -1,13 +1,12 @@
 ---
-title: "Global Travel Monitor (API Mirror)"
+title: "Global Travel Monitor (System Curl Strategy)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 if (!require("pacman")) install.packages("pacman")
-# API 데이터 처리를 위한 jsonlite 패키지 필수
-pacman::p_load(jsonlite, tidyverse, telegram.bot, readr, lubridate, httr)
+pacman::p_load(jsonlite, tidyverse, telegram.bot, readr, lubridate)
 
 
 TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
@@ -15,119 +14,99 @@ MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
-print(paste("🌍 [Global Watch]", Sys.time(), "API 미러 사이트 접속 중..."))
+print(paste("🌍 [Global Watch]", Sys.time(), "시스템 CURL 방식으로 데이터 수집 시작..."))
 
-# [핵심] 국무부 데이터를 미러링하는 오픈 API 주소
 api_url <- "[https://www.travel-advisory.info/api](https://www.travel-advisory.info/api)"
+temp_file <- "temp_api_data.json" # 임시 다운로드 파일
 csv_file <- "travel_status_memory.csv"
 
-# 데이터 가져오는 함수
-fetch_api_data <- function() {
+# [핵심 전략] R 패키지 대신 시스템 명령어(curl)로 강제 다운로드
+# -L: 리다이렉트 추적, -k: SSL 보안경고 무시 (접속 성공률 높임)
+download_cmd <- paste0("curl -L -k -H 'User-Agent: Mozilla/5.0' -o ", temp_file, " '", api_url, "'")
+
+# 시스템 명령어 실행
+exit_code <- system(download_cmd)
+
+if (exit_code == 0 && file.exists(temp_file) && file.info(temp_file)$size > 100) {
+  print("✅ JSON 파일 다운로드 성공! 데이터 분석 시작.")
+  
   tryCatch({
-    # 1. API 요청 (헤더를 추가해서 봇 차단 방지)
-    response <- GET(
-      api_url,
-      add_headers("User-Agent" = "Mozilla/5.0 (compatible; TravelMonitorBot/1.0)")
-    )
+    # 1. 다운로드된 파일 읽기
+    json_data <- fromJSON(temp_file)
     
-    # 2. 상태 확인
-    if (status_code(response) != 200) {
-      print(paste("⚠️ API 접속 실패:", status_code(response)))
-      return(NULL)
-    }
+    # 2. 데이터 정리
+    raw_data <- json_data$data
     
-    # 3. JSON 파싱
-    json_content <- fromJSON(content(response, "text", encoding = "UTF-8"))
-    
-    # 4. 데이터 추출 (복잡한 리스트 구조를 데이터프레임으로 변환)
-    # 이 API는 국가 코드가 Key로 되어 있어서 리스트를 풀어야 함
-    raw_data <- json_content$data
-    
-    # purrr 패키지로 리스트 -> 데이터프레임 변환
-    clean_df <- map_dfr(raw_data, function(x) {
+    current_data <- map_dfr(raw_data, function(x) {
       tibble(
         Country = x$name,
-        # 점수: 0(안전) ~ 5(위험). 국무부 등급을 점수화한 것
         Score = as.numeric(x$advisory$score),
-        # 국무부 원본 업데이트 날짜
         Update_Date = as_datetime(x$advisory$updated)
       )
     }) %>%
       select(Country, Score) %>%
       filter(!is.na(Score))
     
-    return(clean_df)
+    print(paste("📊 데이터 파싱 완료. 총", nrow(current_data), "개국."))
+
+    # 3. 과거 데이터 비교
+    if (file.exists(csv_file)) {
+      past_data <- read_csv(csv_file, show_col_types = FALSE)
+      
+      comparison <- current_data %>%
+        inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
+        filter(Score_new != Score_old)
+        
+      if (nrow(comparison) > 0) {
+        for(i in 1:nrow(comparison)) {
+          row <- comparison[i, ]
+          diff <- row$Score_new - row$Score_old
+          
+          if (diff > 0) {
+             emoji <- "📉 (악화)"
+             status_msg <- paste0("위험도 증가 (+", round(diff, 1), ")")
+          } else {
+             emoji <- "📈 (호전)"
+             status_msg <- paste0("상황 개선 (", round(diff, 1), ")")
+          }
+          
+          # 레벨 추정
+          level_est <- case_when(
+            row$Score_new >= 4.5 ~ "⛔ 금지 (Lv.4)",
+            row$Score_new >= 3.5 ~ "🟠 재고 (Lv.3)",
+            row$Score_new >= 2.5 ~ "🟡 주의 (Lv.2)",
+            TRUE ~ "🔵 안전 (Lv.1)"
+          )
+          
+          msg <- paste0(
+            "🌍 [안전점수 변경]\n\n",
+            "🏳️ 국가: ", row$Country, "\n",
+            emoji, " 상태: ", status_msg, "\n",
+            "🔢 점수: ", row$Score_old, " ➡️ ", row$Score_new, " / 5.0\n",
+            "📊 추정: ", level_est, "\n",
+            "🔗 출처: travel-advisory.info"
+          )
+          
+          try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+          Sys.sleep(1)
+        }
+        print(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
+      } else {
+        print("   -> 점수 변동 사항 없음.")
+      }
+    } else {
+      print("   -> [초기화] 첫 실행. 기준 데이터 저장.")
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] 시스템 CURL 방식으로 초기화 완료."))
+    }
+    
+    # 4. 파일 저장 (이게 성공해야 git add가 됨)
+    write_csv(current_data, csv_file)
+    print(paste("💾 데이터 저장 완료:", csv_file))
     
   }, error = function(e) {
-    print(paste("⚠️ 에러 발생:", e$message))
-    return(NULL)
+    print(paste("❌ 파싱 에러:", e$message))
   })
-}
-
-# --- 메인 실행 ---
-
-current_data <- fetch_api_data()
-
-if (!is.null(current_data) && nrow(current_data) > 0) {
-  print(paste("✅ 데이터 수집 성공! 총", nrow(current_data), "개국 확인."))
   
-  # 과거 데이터 비교
-  if (file.exists(csv_file)) {
-    past_data <- read_csv(csv_file, show_col_types = FALSE)
-    
-    # 국가명 기준으로 비교
-    comparison <- current_data %>%
-      inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
-      filter(Score_new != Score_old) # 점수가 바뀐 경우
-      
-    if (nrow(comparison) > 0) {
-      for(i in 1:nrow(comparison)) {
-        row <- comparison[i, ]
-        
-        # 점수 변화 계산
-        diff <- row$Score_new - row$Score_old
-        
-        if (diff > 0) {
-           emoji <- "📉 (악화)"
-           status_msg <- paste0("위험도 증가 (+", round(diff, 1), ")")
-        } else {
-           emoji <- "📈 (호전)"
-           status_msg <- paste0("상황 개선 (", round(diff, 1), ")")
-        }
-        
-        # 점수를 국무부 Level로 대략 환산 (참고용)
-        level_est <- case_when(
-          row$Score_new >= 4.5 ~ "⛔ 금지 (Lv.4)",
-          row$Score_new >= 3.5 ~ "🟠 재고 (Lv.3)",
-          row$Score_new >= 2.5 ~ "🟡 주의 (Lv.2)",
-          TRUE ~ "🔵 안전 (Lv.1)"
-        )
-        
-        msg <- paste0(
-          "🇺🇸 [안전등급 변경 알림]\n\n",
-          "🏳️ 국가: ", row$Country, "\n",
-          emoji, " 상태: ", status_msg, "\n",
-          "🔢 점수: ", row$Score_old, " ➡️ ", row$Score_new, " (5점 만점)\n",
-          "📊 추정 등급: ", level_est, "\n",
-          "🔗 출처: travel-advisory.info"
-        )
-        
-        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
-        Sys.sleep(1)
-      }
-      print(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
-    } else {
-      print("   -> 변동 사항 없음.")
-    }
-  } else {
-    print("   -> [초기화] 첫 실행. 기준 데이터 저장.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] API 방식 초기화 완료."))
-  }
-  
-  # 파일 저장
-  write_csv(current_data, csv_file)
-  print(paste("💾 데이터 저장 완료:", csv_file))
-
 } else {
-  print("❌ 데이터 수집 실패 (API 오류)")
+  print("❌ 최종 실패: CURL 다운로드조차 실패했습니다.")
 }
