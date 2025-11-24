@@ -1,62 +1,33 @@
 ---
-title: "Consular Protection Monitor (Southwest US)"
+title: "Consular Protection Monitor (Korean Focus)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
-# 1. 라이브러리 로드 (설치 안 된 경우 자동 설치)
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(httr, jsonlite, tidyRSS, tidyverse, telegram.bot, rvest, lubridate, purrr)
 
-# ==============================================================================
-# 2. 보안 설정: GitHub Secrets에서 비밀번호 가져오기
-# (주의: 이 파일에 절대 진짜 키를 적지 마세요!)
-# ==============================================================================
+
 GEMINI_API_KEY     <- Sys.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
 MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
-
-# [설정] 사용할 모델명
 MODEL_NAME         <- "gemini-2.5-flash"
-
-# 텔레그램 봇 초기화
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
-# ==============================================================================
-# 3. 핵심 함수 정의
-# ==============================================================================
 
-# [함수 1] 제미나이 직접 호출 (수동 API 요청)
 ask_gemini_direct <- function(prompt) {
   url <- paste0("[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)", MODEL_NAME, ":generateContent?key=", GEMINI_API_KEY)
-  
-  body_data <- list(
-    contents = list(list(parts = list(list(text = prompt))))
-  )
-  
+  body_data <- list(contents = list(list(parts = list(list(text = prompt)))))
   tryCatch({
-    response <- POST(
-      url, 
-      add_headers("Content-Type" = "application/json"), 
-      body = toJSON(body_data, auto_unbox = TRUE)
-    )
-    
+    response <- POST(url, add_headers("Content-Type" = "application/json"), body = toJSON(body_data, auto_unbox = TRUE))
     if (status_code(response) == 200) {
       result_json <- fromJSON(content(response, "text", encoding = "UTF-8"))
       return(result_json$candidates$content$parts[[1]]$text)
-    } else {
-      print(paste("⚠️ API Error Code:", status_code(response)))
-      return(NULL)
-    }
-  }, error = function(e) {
-    print("⚠️ 제미나이 통신 실패")
-    return(NULL)
-  })
+    } else { return(NULL) }
+  }, error = function(e) { return(NULL) })
 }
 
-# [함수 2] 뉴스 본문 스크래핑
 get_full_text <- function(link) {
   tryCatch({
     page <- read_html(link, options = "NO_ERROR")
@@ -66,32 +37,21 @@ get_full_text <- function(link) {
   }, error = function(e) { return(NULL) })
 }
 
-# [함수 3] 뉴스 수집 (범위 확장: CA, NV, AZ, NM)
 fetch_news <- function() {
-  
-  # 1. Google News US (영어) - 4개 주 통합 검색
-  # 쿼리: (CA OR NV OR AZ OR NM) AND (사고 키워드)
+  # Google US: 4개 주 통합 검색
   url_google_us <- "[https://news.google.com/rss/search?q=(California+OR+Nevada+OR+Arizona+OR+%22New+Mexico%22)+(accident+OR+disaster+OR+shooting+OR+crash+OR+death)+when:1h&ceid=US:en&hl=en-US&gl=US](https://news.google.com/rss/search?q=(California+OR+Nevada+OR+Arizona+OR+%22New+Mexico%22)+(accident+OR+disaster+OR+shooting+OR+crash+OR+death)+when:1h&ceid=US:en&hl=en-US&gl=US)"
-  
-  # 2. 미주 중앙일보 (LA 사회면 - 서부 거점)
+  # 미주 중앙일보 (LA)
   url_joongang <- "[https://rss.koreadaily.com/la/society.xml](https://rss.koreadaily.com/la/society.xml)"
-  
-  # 3. 라디오코리아 (LA 뉴스 - 서부 거점)
+  # 라디오코리아
   url_radiokorea <- "[https://www.radiokorea.com/rss/news_news.xml](https://www.radiokorea.com/rss/news_news.xml)"
-  
-  # 4. 구글 뉴스 한국어판 (로컬 한인 언론사 포괄 검색)
-  # 특정 신문사 사이트만 지정하는 대신, 4개 주 이름을 키워드로 검색하여 
-  # '라스베가스 한국일보', '아리조나 타임즈' 등 모든 로컬 매체를 잡아냅니다.
+  # 구글 한국어 (로컬 한인 언론 포괄)
   url_korean_regional <- "[https://news.google.com/rss/search?q=(캘리포니아+OR+네바다+OR+애리조나+OR+뉴멕시코)+(사건+OR+사고+OR+화재+OR+총격+OR+사망)+when:1h&ceid=KR:ko&hl=ko&gl=KR](https://news.google.com/rss/search?q=(캘리포니아+OR+네바다+OR+애리조나+OR+뉴멕시코)+(사건+OR+사고+OR+화재+OR+총격+OR+사망)+when:1h&ceid=KR:ko&hl=ko&gl=KR)"
 
   safe_fetch <- function(url, src) {
     tryCatch({
       feed <- tidyRSS::tidyfeed(url)
       if (nrow(feed) > 0) {
-        feed %>% 
-          select(item_title, item_link, item_description, item_pub_date) %>% 
-          mutate(source = src) %>% 
-          head(5) # 소스당 최신 5개
+        feed %>% select(item_title, item_link, item_description, item_pub_date) %>% mutate(source = src) %>% head(5)
       } else { NULL }
     }, error = function(e) { return(NULL) })
   }
@@ -104,78 +64,53 @@ fetch_news <- function() {
   )
 }
 
-# ==============================================================================
-# 4. 메인 실행 로직 (Southwest US Monitor)
-# ==============================================================================
-print(paste("📡 [GitHub Action]", Sys.time(), "뉴스 체크 시작 (Target: CA, NV, AZ, NM)"))
 
+print(paste("📡 [Korean Monitor]", Sys.time(), "뉴스 체크 시작"))
 news_data <- fetch_news()
 alert_count <- 0
 
 if (is.null(news_data) || nrow(news_data) == 0) {
-  print("   -> 수집된 뉴스가 없습니다.")
-  try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [점검] 수집된 새 뉴스가 없습니다. (시스템 정상)"))
-  
+  try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [한인 보호] 수집된 새 뉴스가 없습니다. (시스템 정상)"))
 } else {
-  
-  # [중요] 최근 40분 이내 기사만 필터링
+  # 최근 40분 필터링
   current_time <- Sys.time()
   news_data <- news_data %>%
     mutate(pub_date_parsed = ymd_hms(item_pub_date)) %>%
     filter(pub_date_parsed >= (current_time - minutes(40)))
   
   if (nrow(news_data) > 0) {
-    print(paste("   ->", nrow(news_data), "개의 최신 기사를 분석합니다."))
-    
     for(i in 1:nrow(news_data)) {
       title <- news_data$item_title[i]; link <- news_data$item_link[i]; desc <- news_data$item_description[i]; src <- news_data$source[i]
-      
-      # 본문 긁기 시도
       full_text <- get_full_text(link)
       content_src <- if(is.null(full_text)) gsub("<.*?>", "", desc) else full_text
       
-      # 프롬프트 업데이트 (4개 주 반영)
       prompt <- paste0(
         "Analyze this news.\n Source: ", src, "\n Title: ", title, "\n Content: ", content_src, "\n\n",
-        
-        "YOUR TASK: Act as a Consul. Identify negative incidents (crime, accident, disaster) involving Koreans in Southwest US (California, Nevada, Arizona, New Mexico).\n",
-        
-        "CRITERIA:\n",
-        "1. Korean Media (Joongang, RadioKorea, Korean_Regional):\n",
-        "   -> Check if it is a negative incident. (Ignore ads, general good news).\n",
-        "2. Google US (English):\n",
-        "   -> Check for Korean names (Kim, Lee, Park), Korean locations (Koreatown), or Korean businesses.\n",
-        "   -> Check if the location is in CA, NV, AZ, or NM.\n\n",
-        
-        "OUTPUT FORMAT (Strictly):\n",
-        "'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short logic] | Summary: [1 sentence Korean]'"
+        "YOUR TASK: Act as a Consul. Identify negative incidents (crime, accident, disaster) involving Koreans in Southwest US (CA, NV, AZ, NM).\n",
+        "CRITERIA:\n 1. Korean Media: Check if negative incident.\n 2. Google US: Check Korean names/locations/businesses in CA/NV/AZ/NM.\n",
+        "OUTPUT: 'Major: [Yes/No] | Korean: [Yes/No] | Reason: [Short logic] | Summary: [1 sentence Korean]'"
       )
       
       Sys.sleep(4)
       analysis <- ask_gemini_direct(prompt)
       
-      # 분석 결과 처리
       if (!is.null(analysis) && str_detect(analysis, "Korean: Yes")) {
         summary <- str_extract(analysis, "(?<=Summary: ).*")
         reason <- str_extract(analysis, "(?<=Reason: ).*(?=\\| Summary)")
         msg <- paste0("🚨 [긴급] 한인 관련 사건 (", src, ")\n\n📌 ", title, "\n🧐 ", reason, "\n📝 ", summary, "\n🔗 ", link)
-        
-        tryCatch({
+        try({
           bot$sendMessage(chat_id = MY_CHAT_ID, text = msg)
-          print(paste("✅ 알림 전송:", title))
           alert_count <- alert_count + 1
-        }, error = function(e) { print("전송 실패") })
+        })
       }
     }
-    
-    # 생존 신고 (특이사항 없을 때)
     if (alert_count == 0) {
-      safe_msg <- paste0("✅ [점검] 4개 주(CA, NV, AZ, NM) 뉴스 ", nrow(news_data), "건 확인 결과, 한인 관련 특이사항 없습니다.")
-      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = safe_msg))
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = paste0("✅ [한인 보호] ", nrow(news_data), "건 확인. 특이사항 없음.")))
     }
-
   } else {
-    print("   -> 최근 40분 내 새로운 기사가 없습니다.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [점검] 최근 40분 내 발생한 새 뉴스가 없습니다."))
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [한인 보호] 최근 40분 내 새 뉴스 없음."))
   }
 }
+
+
+
