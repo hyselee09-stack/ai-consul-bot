@@ -1,0 +1,47 @@
+```yaml
+name: Global Travel Monitor Schedule
+
+on:
+  schedule:
+    # 매일 UTC 00:00 (한국 09:00 / 캘리포니아 16:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+# [중요] 깃허브 저장소에 파일을 쓸 수 있는 권한 부여
+permissions:
+  contents: write
+
+jobs:
+  run-global-monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-pandoc@v2
+      
+      - name: Install Linux Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+        
+      - name: Install R Packages
+        run: |
+          install.packages(c("rmarkdown", "pacman", "tidyRSS", "tidyverse", "telegram.bot", "lubridate", "stringr", "readr"), repos = "https://cloud.r-project.org")
+        shell: Rscript {0}
+        
+      - name: Run Global Monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+        run: Rscript -e "rmarkdown::render('global_travel_monitor.Rmd')"
+      
+      # [핵심] 생성된 CSV 파일을 깃허브에 저장(Commit & Push)하는 단계
+      - name: Commit and Push Data
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add travel_status_memory.csv
+          # 변경사항이 있을 때만 커밋 (에러 방지)
+          git commit -m "Update travel advisory data" || echo "No changes to commit"
+          git push
