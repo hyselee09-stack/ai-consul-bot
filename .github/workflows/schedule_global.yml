@@ -1,12 +1,12 @@
-name: US Global Travel Monitor Schedule
+name: 🌍 US Global Travel Monitor Schedule
 
 on:
   schedule:
-    # 매일 UTC 00:00 (한국 09:00 / 캘리포니아 16:00)
+    # Run daily at 00:00 UTC (09:00 KST / 16:00 PST)
     - cron: '0 0 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual trigger
 
-# [중요] 깃허브 저장소에 파일을 쓸 수 있는 권한 부여
+# [Important] Grant write permission to the repository to save CSV files
 permissions:
   contents: write
 
@@ -14,6 +14,12 @@ jobs:
   run-global-monitor:
     runs-on: ubuntu-latest
     
+    # [1] Environment Variables: Set custom library path for caching
+    env:
+      R_LIBS_USER: ./R/library
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+
     steps:
       - uses: actions/checkout@v3
       
@@ -21,34 +27,47 @@ jobs:
       
       - uses: r-lib/actions/setup-pandoc@v2
       
-      - name: Install Linux Deps
+      - name: Install Linux System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
         
+      # [2] Cache Configuration: Restore packages from cache if key matches
+      - name: Cache R Packages
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-r-
+
+      # [3] Install Packages: Install to the cached directory
       - name: Install R Packages
         run: |
-          install.packages(c("rmarkdown", "pacman", "tidyRSS", "tidyverse", "telegram.bot", "lubridate", "stringr", "readr"), repos = "https://cloud.r-project.org")
+          # Create directory for cached libraries
+          dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)
+          
+          # Install packages to the custom library path
+          install.packages(c("rmarkdown", "pacman", "tidyRSS", "tidyverse", "telegram.bot", "lubridate", "stringr", "readr"), 
+                           repos = "https://cloud.r-project.org", 
+                           lib = Sys.getenv("R_LIBS_USER"))
         shell: Rscript {0}
         
-      - name: Run Global Monitor
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+      - name: Run Global Monitor Script
         run: Rscript -e "rmarkdown::render('global_travel_monitor.Rmd')"
       
-      # [수정됨] Commit & Push 단계 (인증 토큰 추가)
+      # [4] Save Results (Commit & Push)
       - name: Commit and Push Data
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 깃허브가 제공하는 자동 토큰
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Token provided automatically by GitHub
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
           
           git add travel_status_memory.csv
           
-          # 변경사항이 있을 때만 커밋
+          # Commit only if there are changes (prevents errors if no update)
           git commit -m "Update travel advisory data" || echo "No changes to commit"
           
-          # [핵심 수정] 리모트 주소에 토큰을 포함해서 Push
+          # Push changes using the auth token
           git push "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
