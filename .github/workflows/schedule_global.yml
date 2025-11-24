@@ -1,127 +1,68 @@
----
-title: "US Global Travel Advisory Monitor (Robust Scraping)"
-output: html_document
----
+name: 🌍 US Global Travel Monitor Schedule
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-# Load necessary packages (httr is essential for bypassing bot detection)
-if (!require("pacman")) install.packages("pacman")
-pacman::p_load(httr, tidyRSS, tidyverse, telegram.bot, lubridate, stringr, readr, xml2)
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allows manual trigger
 
+permissions:
+  contents: write
 
-TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
-MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
-bot <- Bot(token = TELEGRAM_BOT_TOKEN)
-
-
-# Helper function for logging with timestamps
-log_msg <- function(msg) {
-  message(paste0("[", Sys.time(), "] ", msg))
-}
-
-log_msg("🌍 [Global Watch] Starting Travel Advisory Scan...")
-
-# [Target] US State Department Travel Advisory RSS Feed
-feed_url <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss)"
-csv_file <- "travel_status_memory.csv"
-
-# [Critical Function] Safe Fetch to bypass 403 Forbidden & SSL errors
-fetch_feed_safe <- function(url) {
-  tryCatch({
-    # 1. Pretend to be a browser (User-Agent Spoofing + Ignore SSL)
-    response <- GET(
-      url, 
-      config = config(ssl_verifypeer = 0L, ssl_verifyhost = 0L), # Ignore SSL certificate errors
-      add_headers(
-        "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept" = "application/rss+xml, application/xml, text/xml, */*"
-      ),
-      timeout(30) # Wait up to 30 seconds
-    )
+jobs:
+  run-global-monitor:
+    runs-on: ubuntu-latest
     
-    log_msg(paste("📡 Connection Status Code:", status_code(response)))
-    
-    if (status_code(response) != 200) {
-      log_msg("⚠️ Connection Failed! (Blocked or Server Error)")
-      return(NULL)
-    }
-    
-    # 2. Parse the content
-    content_text <- content(response, "text", encoding = "UTF-8")
-    return(tidyRSS::tidyfeed(content_text))
-    
-  }, error = function(e) {
-    log_msg(paste("⚠️ Network/Parsing Error:", e$message))
-    return(NULL)
-  })
-}
+    # Define Environment Variables for the entire job
+    env:
+      R_LIBS_USER: ./R/library
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
 
-# --- Main Execution Logic ---
-
-# 1. Fetch Data Safely
-feed <- fetch_feed_safe(feed_url)
-
-if (!is.null(feed) && nrow(feed) > 0) {
-  log_msg(paste("✅ Data fetch successful! Found", nrow(feed), "items."))
-  
-  # 2. Clean and Process Data
-  current_data <- feed %>%
-    select(item_title, item_link) %>%
-    mutate(
-      Country = str_trim(str_extract(item_title, "^.*?(?=\\s-\\sLevel)")),
-      Level_Num = as.numeric(str_extract(item_title, "(?<=Level\\s)[0-9]")),
-      Level_Text = str_trim(str_extract(item_title, "(?<=Level\\s).*"))
-    ) %>%
-    filter(!is.na(Country) & !is.na(Level_Num)) %>%
-    select(Country, Level_Num, Level_Text, item_link)
-
-  # 3. Compare with Previous Data (If exists)
-  if (file.exists(csv_file)) {
-    past_data <- read_csv(csv_file, show_col_types = FALSE)
-    
-    comparison <- current_data %>%
-      inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
-      filter(Level_Num_new != Level_Num_old) 
+    steps:
+      - uses: actions/checkout@v3
       
-    if (nrow(comparison) > 0) {
-      for(i in 1:nrow(comparison)) {
-        row <- comparison[i, ]
+      - uses: r-lib/actions/setup-r@v2
+      
+      - uses: r-lib/actions/setup-pandoc@v2
+      
+      - name: Install Linux System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
         
-        # Determine Direction of Change
-        if (row$Level_Num_new > row$Level_Num_old) {
-           emoji <- "📉"
-           status_msg <- "Risk Increased (Worsened)"
-        } else {
-           emoji <- "📈"
-           status_msg <- "Situation Improved"
-        }
-        
-        # Compose Telegram Message
-        msg <- paste0(
-          "🇺🇸 [Travel Advisory Update]\n\n",
-          "🏳️ Country: ", row$Country, "\n",
-          emoji, " Status: ", status_msg, "\n",
-          "🔢 Level: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
-          "🔗 Link: ", row$item_link_new
-        )
-        
-        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
-        Sys.sleep(1)
-      }
-      log_msg(paste("✅ Sent alerts for", nrow(comparison), "changed countries."))
-    } else {
-      log_msg("-> No changes in safety levels.")
-    }
-  } else {
-    log_msg("-> [Init] First run. Creating initial data file.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [Travel Monitor] Initial data collection complete."))
-  }
-  
-  # 4. Save Current Data (Only if fetch was successful)
-  write_csv(current_data, csv_file)
-  log_msg(paste("💾 Data saved to:", csv_file))
+      - name: Cache R Packages
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-r-
 
-} else {
-  log_msg("❌ Final Failure: Could not fetch data. File will not be updated.")
-}
+      - name: Install R Packages
+        run: |
+          dir.create(Sys.getenv("R_LIBS_USER"), recursive = TRUE, showWarnings = FALSE)
+          install.packages(c("rmarkdown", "pacman", "httr", "rvest", "tidyverse", "telegram.bot", "lubridate", "stringr", "readr", "xml2"), 
+                           repos = "https://packagemanager.posit.co/cran/__linux__/jammy/latest", 
+                           lib = Sys.getenv("R_LIBS_USER"))
+        shell: Rscript {0}
+        
+      # 👇 [여기입니다!] R 코드를 실행하는 핵심 명령어 👇
+      - name: Run Global Monitor Script
+        run: Rscript -e "rmarkdown::render('US_global_travel_monitor.Rmd')"
+      
+      - name: Commit and Push Data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          
+          if [ -f travel_status_memory.csv ]; then
+            echo "✅ CSV file found. Committing..."
+            git add travel_status_memory.csv
+            git commit -m "Update travel advisory data" || echo "No changes to commit"
+            git push "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          else
+            echo "⚠️ CSV file was NOT created. Skipping commit."
+          fi
