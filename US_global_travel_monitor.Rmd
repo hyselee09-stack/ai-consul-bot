@@ -1,13 +1,12 @@
 ---
-title: "US Global Travel Advisory Monitor (AllOrigins Proxy)"
+title: "US Global Travel Advisory Monitor (System Curl Impersonation)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 if (!require("pacman")) install.packages("pacman")
-# xml2와 httr 패키지가 핵심입니다
-pacman::p_load(httr, tidyRSS, tidyverse, telegram.bot, lubridate, stringr, readr, xml2)
+pacman::p_load(rvest, tidyverse, telegram.bot, lubridate, stringr, readr)
 
 
 TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
@@ -15,109 +14,121 @@ MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
-# 로그 함수
 log_msg <- function(msg) {
   message(paste0("[", Sys.time(), "] ", msg))
 }
 
-log_msg("🌍 [Global Watch] AllOrigins 프록시를 통한 접속 시도...")
+log_msg("🌍 [Global Watch] 시스템 CURL을 이용한 정밀 타격 시작...")
 
-# 국무부 RSS 원본 주소
-target_rss <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss)"
-csv_file <- "travel_status_memory.csv"
+# [Target] RSS가 아닌 '일반 웹페이지' (보안이 상대적으로 낮음)
+target_url <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html)"
+temp_file  <- "downloaded_page.html"
+csv_file   <- "travel_status_memory.csv"
 
-# [핵심 전략] AllOrigins 프록시 사용 + 타임스탬프로 캐시 방지
-# 이 주소를 통하면 요청자가 'GitHub'가 아니라 'AllOrigins'가 됩니다.
-proxy_url <- paste0(
-  "[https://api.allorigins.win/raw?url=](https://api.allorigins.win/raw?url=)", URLencode(target_rss),
-  "&disableCache=", as.numeric(Sys.time()) # 매번 새로운 요청처럼 보이게 함
-)
-
-# 데이터 수집 함수
-fetch_feed_proxy <- function() {
-  tryCatch({
-    # 1. 프록시 서버에 요청
-    response <- GET(proxy_url, timeout(60))
-    
-    # 2. 상태 확인
-    if (status_code(response) != 200) {
-      log_msg(paste("⚠️ 프록시 서버 오류:", status_code(response)))
-      return(NULL)
-    }
-    
-    # 3. XML 내용 파싱 (Raw Text -> XML -> Tidy Frame)
-    xml_content <- content(response, "text", encoding = "UTF-8")
-    
-    # 내용이 비어있는지 확인
-    if (nchar(xml_content) < 100) {
-      log_msg("⚠️ 빈 데이터가 반환되었습니다.")
-      return(NULL)
-    }
-    
-    # tidyRSS로 변환
-    return(tidyRSS::tidyfeed(xml_content))
-    
-  }, error = function(e) {
-    log_msg(paste("⚠️ 에러 발생:", e$message))
-    return(NULL)
-  })
+# [핵심 전략] 리눅스 시스템의 curl 명령어로 브라우저 완벽 흉내
+download_html_system <- function(url, dest) {
+  # 실제 크롬 브라우저가 보내는 헤더를 그대로 복사
+  cmd <- paste0(
+    "curl -s -L ", # 조용히(-s), 리다이렉트 추적(-L)
+    "-A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' ",
+    "-H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' ",
+    "-H 'Accept-Language: en-US,en;q=0.9' ",
+    "-H 'Cache-Control: max-age=0' ",
+    "-H 'Connection: keep-alive' ",
+    "-H 'Upgrade-Insecure-Requests: 1' ",
+    "-H 'Sec-Fetch-Dest: document' ",
+    "-H 'Sec-Fetch-Mode: navigate' ",
+    "-H 'Sec-Fetch-Site: none' ",
+    "-H 'Sec-Fetch-User: ?1' ",
+    "-o ", dest, " ",
+    "'", url, "'"
+  )
+  
+  log_msg("📡 시스템 CURL 명령 실행 중...")
+  exit_code <- system(cmd)
+  
+  # 파일이 존재하고 용량이 1KB 이상이어야 성공
+  if (exit_code == 0 && file.exists(dest) && file.info(dest)$size > 1000) {
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
 }
 
 # --- 실행 로직 ---
 
-feed <- fetch_feed_proxy()
-
-if (!is.null(feed) && nrow(feed) > 0) {
-  log_msg(paste("✅ 데이터 수집 성공! 총", nrow(feed), "개국 확인."))
+if (download_html_system(target_url, temp_file)) {
+  log_msg("✅ HTML 다운로드 성공! 데이터 파싱 시작.")
   
-  # 데이터 정제
-  current_data <- feed %>%
-    select(item_title, item_link) %>%
-    mutate(
-      Country = str_trim(str_extract(item_title, "^.*?(?=\\s-\\sLevel)")),
-      Level_Num = as.numeric(str_extract(item_title, "(?<=Level\\s)[0-9]")),
-      Level_Text = str_trim(str_extract(item_title, "(?<=Level\\s).*"))
-    ) %>%
-    filter(!is.na(Country) & !is.na(Level_Num)) %>%
-    select(Country, Level_Num, Level_Text, item_link)
-
-  # 과거 데이터 비교
-  if (file.exists(csv_file)) {
-    past_data <- read_csv(csv_file, show_col_types = FALSE)
+  tryCatch({
+    # 1. 다운로드한 파일 읽기
+    page <- read_html(temp_file)
     
-    comparison <- current_data %>%
-      inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
-      filter(Level_Num_new != Level_Num_old) 
+    # 2. 테이블 추출 (웹페이지 구조 분석)
+    # data-table 클래스를 가진 테이블을 찾음
+    raw_table <- page %>% 
+      html_element("table") %>% 
+      html_table()
+    
+    if (nrow(raw_table) > 0) {
+      # 3. 데이터 정제
+      current_data <- raw_table %>%
+        select(Advisory, Level, Date) %>%
+        rename(Country = Advisory, Level_Text = Level, Date_Str = Date) %>%
+        mutate(
+          Country = str_remove(Country, " Travel Advisory"),
+          Level_Num = as.numeric(str_extract(Level_Text, "[0-9]")),
+          # 날짜 파싱 (예: October 20, 2023)
+          Pub_Date = mdy(Date_Str),
+          Link = target_url
+        ) %>%
+        filter(!is.na(Country) & !is.na(Level_Num))
       
-    if (nrow(comparison) > 0) {
-      for(i in 1:nrow(comparison)) {
-        row <- comparison[i, ]
-        emoji <- ifelse(row$Level_Num_new > row$Level_Num_old, "📉", "📈")
-        status_msg <- ifelse(row$Level_Num_new > row$Level_Num_old, "위험 증가", "상황 호전")
-        
-        msg <- paste0(
-          "🇺🇸 [여행경보 변경]\n\n",
-          "🏳️ 국가: ", row$Country, "\n",
-          emoji, " 상태: ", status_msg, "\n",
-          "🔢 등급: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
-          "🔗 링크: ", row$item_link_new
-        )
-        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
-        Sys.sleep(1)
-      }
-      log_msg(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
-    } else {
-      log_msg("-> 변동 사항 없음.")
-    }
-  } else {
-    log_msg("-> [초기화] 첫 실행. 데이터 파일 생성.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] AllOrigins 우회 방식으로 데이터 수집 성공."))
-  }
-  
-  # 파일 저장 (성공 시에만)
-  write_csv(current_data, csv_file)
-  log_msg(paste("💾 파일 저장 완료:", csv_file))
+      log_msg(paste("📊 추출된 국가 수:", nrow(current_data)))
 
+      # 4. 과거 데이터 비교
+      if (file.exists(csv_file)) {
+        past_data <- read_csv(csv_file, show_col_types = FALSE)
+        
+        comparison <- current_data %>%
+          inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
+          filter(Level_Num_new != Level_Num_old) 
+          
+        if (nrow(comparison) > 0) {
+          for(i in 1:nrow(comparison)) {
+            row <- comparison[i, ]
+            emoji <- ifelse(row$Level_Num_new > row$Level_Num_old, "📉", "📈")
+            msg <- paste0(
+              "🇺🇸 [여행경보 변경]\n\n",
+              "🏳️ 국가: ", row$Country, "\n",
+              emoji, " 등급: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
+              "📅 날짜: ", row$Date_Str_new, "\n",
+              "🔗 확인: ", target_url
+            )
+            try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+            Sys.sleep(1)
+          }
+          log_msg(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
+        } else {
+          log_msg("-> 변동 사항 없음.")
+        }
+      } else {
+        log_msg("-> [초기화] 첫 실행. 데이터 파일 생성.")
+        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] 초기화 완료 (CURL 방식)."))
+      }
+      
+      # 파일 저장 (성공 시에만)
+      write_csv(current_data, csv_file)
+      log_msg(paste("💾 파일 저장 완료:", csv_file))
+      
+    } else {
+      log_msg("❌ 테이블을 찾을 수 없습니다. (웹사이트 구조 변경 가능성)")
+    }
+    
+  }, error = function(e) {
+    log_msg(paste("⚠️ 파싱 에러:", e$message))
+  })
+  
 } else {
-  log_msg("❌ 최종 실패: 모든 우회 수단이 막혔습니다.")
+  log_msg("❌ CURL 다운로드 실패 (여전히 차단됨)")
 }
