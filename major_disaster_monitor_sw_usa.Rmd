@@ -1,0 +1,111 @@
+#### (2) `major_disaster_monitor_sw_usa.Rmd` (대형 재난용)
+> **역할:** 산불, 지진, 총기 난사 등 대형 공공 안전 위협 감시
+
+```markdown
+---
+title: "Major Disaster Monitor (SW USA)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(httr, jsonlite, tidyRSS, tidyverse, telegram.bot, rvest, lubridate, purrr)
+
+
+GEMINI_API_KEY     <- Sys.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
+MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
+MODEL_NAME         <- "gemini-2.5-flash"
+bot <- Bot(token = TELEGRAM_BOT_TOKEN)
+
+
+ask_gemini_direct <- function(prompt) {
+  url <- paste0("[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)", MODEL_NAME, ":generateContent?key=", GEMINI_API_KEY)
+  body_data <- list(contents = list(list(parts = list(list(text = prompt)))))
+  tryCatch({
+    response <- POST(url, add_headers("Content-Type" = "application/json"), body = toJSON(body_data, auto_unbox = TRUE))
+    if (status_code(response) == 200) {
+      result_json <- fromJSON(content(response, "text", encoding = "UTF-8"))
+      return(result_json$candidates$content$parts[[1]]$text)
+    } else { return(NULL) }
+  }, error = function(e) { return(NULL) })
+}
+
+get_full_text <- function(link) {
+  tryCatch({
+    page <- read_html(link, options = "NO_ERROR")
+    text <- page %>% html_nodes("p") %>% html_text() %>% paste(collapse = " ")
+    if (nchar(text) < 100) return(NULL)
+    return(substr(text, 1, 2000))
+  }, error = function(e) { return(NULL) })
+}
+
+fetch_news <- function() {
+  # 대형 재난 키워드 (4개 주)
+  base_url <- "[https://news.google.com/rss/search?q=(California+OR+Nevada+OR+Arizona+OR+%22New+Mexico%22)+(wildfire+OR+earthquake+OR+flood+OR+%22mass+shooting%22+OR+%22active+shooter%22+OR+explosion+OR+%22state+of+emergency%22+OR+evacuation)+when:1h&ceid=US:en&hl=en-US&gl=US](https://news.google.com/rss/search?q=(California+OR+Nevada+OR+Arizona+OR+%22New+Mexico%22)+(wildfire+OR+earthquake+OR+flood+OR+%22mass+shooting%22+OR+%22active+shooter%22+OR+explosion+OR+%22state+of+emergency%22+OR+evacuation)+when:1h&ceid=US:en&hl=en-US&gl=US)"
+  
+  tryCatch({
+    feed <- tidyRSS::tidyfeed(base_url)
+    if (nrow(feed) > 0) {
+      feed %>% select(item_title, item_link, item_description, item_pub_date) %>% head(7)
+    } else { NULL }
+  }, error = function(e) { return(NULL) })
+}
+
+
+print(paste("📡 [Disaster Monitor]", Sys.time(), "재난 스캔 중"))
+news_data <- fetch_news()
+alert_count <- 0
+
+if (is.null(news_data) || nrow(news_data) == 0) {
+  try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [재난 감시] 특이사항 없음."))
+} else {
+  current_time <- Sys.time()
+  news_data <- news_data %>%
+    mutate(pub_date_parsed = ymd_hms(item_pub_date)) %>%
+    filter(pub_date_parsed >= (current_time - minutes(40)))
+  
+  if (nrow(news_data) > 0) {
+    for(i in 1:nrow(news_data)) {
+      title <- news_data$item_title[i]; link <- news_data$item_link[i]; desc <- news_data$item_description[i]
+      full_text <- get_full_text(link)
+      content_src <- if(is.null(full_text)) gsub("<.*?>", "", desc) else full_text
+      
+      prompt <- paste0(
+        "Analyze this news.\n Title: ", title, "\n Content: ", content_src, "\n\n",
+        "YOUR TASK: Determine if this is a 'MAJOR PUBLIC SAFETY THREAT' in CA, NV, AZ, or NM.\n",
+        "CRITERIA for 'MAJOR':\n 1. Mass Shooting (3+ victims)\n 2. Large Disaster (Wildfire, Earthquake > 4.5, Flood)\n 3. Major Accident (Plane/Train)\n 4. IGNORE minor fires/crimes.\n",
+        "OUTPUT: 'Major: [Yes/No] | Type: [Fire/Shooting/Natural/Other] | Severity: [High/Medium] | Summary: [1 sentence Korean]'"
+      )
+      
+      Sys.sleep(4)
+      analysis <- ask_gemini_direct(prompt)
+      
+      if (!is.null(analysis) && str_detect(analysis, "Major: Yes")) {
+        summary <- str_extract(analysis, "(?<=Summary: ).*")
+        type_raw <- str_extract(analysis, "(?<=Type: ).*(?=\\| Severity)")
+        severity <- str_extract(analysis, "(?<=Severity: ).*(?=\\| Summary)")
+        
+        emoji <- case_when(
+          str_detect(type_raw, "Fire") ~ "🔥",
+          str_detect(type_raw, "Shooting") ~ "🔫",
+          str_detect(type_raw, "Natural") ~ "🌊",
+          TRUE ~ "🚨"
+        )
+        msg <- paste0(emoji, " [재난 속보] ", type_raw, "\n\n⚡ 등급: ", severity, "\n📌 제목: ", title, "\n📝 내용: ", summary, "\n🔗 링크: ", link)
+        try({
+          bot$sendMessage(chat_id = MY_CHAT_ID, text = msg)
+          alert_count <- alert_count + 1
+        })
+      }
+    }
+    if (alert_count == 0) {
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = paste0("✅ [재난 감시] ", nrow(news_data), "건 확인. 대형 재난 없음.")))
+    }
+  } else {
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [재난 감시] 최근 40분 내 새 뉴스 없음."))
+  }
+}
+
+
