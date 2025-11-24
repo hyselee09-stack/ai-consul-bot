@@ -1,127 +1,123 @@
 ---
-title: "US Global Travel Advisory Monitor (HTML Scraping)"
+title: "US Global Travel Advisory Monitor (System Curl)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 if (!require("pacman")) install.packages("pacman")
-# Use 'rvest' for web scraping instead of 'tidyRSS'
-pacman::p_load(rvest, tidyverse, telegram.bot, lubridate, stringr, readr)
+pacman::p_load(tidyRSS, tidyverse, telegram.bot, lubridate, stringr, readr, xml2)
 
 
-# Retrieve secrets from GitHub
 TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
 MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
-# Helper function for logging
+# 로그 함수
 log_msg <- function(msg) {
   message(paste0("[", Sys.time(), "] ", msg))
 }
 
-log_msg("🌍 [Global Watch] Starting Travel Advisory Scan...")
+log_msg("🌍 [Global Watch] 시스템 CURL 방식으로 데이터 수집 시도...")
 
-# [Target] The main HTML page containing the table of all countries
-target_url <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html-/](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html-/)"
+# RSS 주소
+feed_url <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss)"
+temp_xml <- "temp_feed.xml"
 csv_file <- "travel_status_memory.csv"
 
-# Function to scrape the HTML table directly
-scrape_travel_table <- function() {
-  tryCatch({
-    # 1. Fetch the webpage
-    # (rvest handles simple scraping well; usually bypasses basic RSS blocks)
-    page <- read_html(target_url)
-    
-    # 2. Extract the table
-    # Look for the <table> tag inside the page
-    raw_table <- page %>% 
-      html_element("table") %>% 
-      html_table()
-    
-    # 3. Clean and Process Data
-    clean_data <- raw_table %>%
-      select(Advisory, Level, Date) %>% # Select relevant columns
-      rename(
-        Country = Advisory,
-        Level_Text = Level,
-        Date_Str = Date
-      ) %>%
-      mutate(
-        # Remove " Travel Advisory" from the country name
-        Country = str_remove(Country, " Travel Advisory"),
-        # Extract just the level number (e.g., "Level 1" -> 1)
-        Level_Num = as.numeric(str_extract(Level_Text, "[0-9]")),
-        # Parse date (Format: October 20, 2023)
-        Pub_Date = mdy(Date_Str),
-        # Use the main URL as the link since the table lacks individual links
-        Link = target_url
-      ) %>%
-      filter(!is.na(Country) & !is.na(Level_Num))
-    
-    return(clean_data)
-    
-  }, error = function(e) {
-    log_msg(paste("⚠️ Scraping Failed:", e$message))
-    return(NULL)
-  })
+# [핵심] 리눅스 시스템 명령어(curl)를 사용해 강제 다운로드
+download_feed_system <- function(url, dest_file) {
+  # User-Agent와 Referer를 설정하여 완벽하게 브라우저인 척 위장
+  cmd <- paste0(
+    "curl -L -s ",  # -L: 리다이렉트 추적, -s: 조용히 실행
+    "-A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' ",
+    "-H 'Referer: [https://www.google.com/](https://www.google.com/)' ",
+    "-o ", dest_file, " ",
+    "'", url, "'"
+  )
+  
+  log_msg("📡 CURL 명령 실행 중...")
+  exit_code <- system(cmd)
+  
+  if (exit_code == 0 && file.exists(dest_file) && file.info(dest_file)$size > 0) {
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
 }
 
-# --- Execute Main Logic ---
+# --- 실행 로직 ---
 
-current_data <- scrape_travel_table()
-
-if (!is.null(current_data) && nrow(current_data) > 0) {
-  log_msg(paste("✅ Data fetch successful! Checked", nrow(current_data), "countries."))
+# 1. 시스템 명령어로 다운로드 시도
+if (download_feed_system(feed_url, temp_xml)) {
+  log_msg("✅ 파일 다운로드 성공! 데이터 파싱 시작.")
   
-  # Check if previous history exists
-  if (file.exists(csv_file)) {
-    past_data <- read_csv(csv_file, show_col_types = FALSE)
+  tryCatch({
+    # 2. 다운로드된 XML 파일 읽기
+    feed <- tidyRSS::tidyfeed(temp_xml)
     
-    # Compare old vs new data based on Country name
-    comparison <- current_data %>%
-      inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
-      filter(Level_Num_new != Level_Num_old) 
+    if (nrow(feed) > 0) {
       
-    # If there are changes
-    if (nrow(comparison) > 0) {
-      for(i in 1:nrow(comparison)) {
-        row <- comparison[i, ]
-        
-        # Determine status (Worsened or Improved)
-        if (row$Level_Num_new > row$Level_Num_old) {
-           emoji <- "📉 (Risk Increase)"
-        } else {
-           emoji <- "📈 (Improved)"
-        }
-        
-        # Compose Alert Message
-        msg <- paste0(
-          "🇺🇸 [Travel Advisory Update]\n\n",
-          "🏳️ Country: ", row$Country, "\n",
-          emoji, " Level: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
-          "📅 Date: ", row$Date_Str_new, "\n",
-          "🔗 Link: ", target_url
-        )
-        
-        # Send Telegram Message
-        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
-        Sys.sleep(1) # Sleep to prevent flooding
-      }
-      log_msg(paste("✅ Sent alerts for", nrow(comparison), "changed countries."))
-    } else {
-      log_msg("-> No changes in safety levels.")
-    }
-  } else {
-    log_msg("-> [Init] First run. Creating initial data file.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [Travel Monitor] Initial data collection complete."))
-  }
-  
-  # Save current data to CSV for next run
-  write_csv(current_data, csv_file)
-  log_msg(paste("💾 Data saved to:", csv_file))
+      # 데이터 정제
+      current_data <- feed %>%
+        select(item_title, item_link) %>%
+        mutate(
+          Country = str_trim(str_extract(item_title, "^.*?(?=\\s-\\sLevel)")),
+          Level_Num = as.numeric(str_extract(item_title, "(?<=Level\\s)[0-9]")),
+          Level_Text = str_trim(str_extract(item_title, "(?<=Level\\s).*"))
+        ) %>%
+        filter(!is.na(Country) & !is.na(Level_Num)) %>%
+        select(Country, Level_Num, Level_Text, item_link)
 
+      # 과거 데이터 비교
+      if (file.exists(csv_file)) {
+        past_data <- read_csv(csv_file, show_col_types = FALSE)
+        
+        comparison <- current_data %>%
+          inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
+          filter(Level_Num_new != Level_Num_old) 
+          
+        if (nrow(comparison) > 0) {
+          for(i in 1:nrow(comparison)) {
+            row <- comparison[i, ]
+            emoji <- ifelse(row$Level_Num_new > row$Level_Num_old, "📉", "📈")
+            
+            msg <- paste0(
+              "🇺🇸 [여행경보 변경]\n\n",
+              "🏳️ 국가: ", row$Country, "\n",
+              emoji, " 등급: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
+              "🔗 링크: ", row$item_link_new
+            )
+            try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+            Sys.sleep(1)
+          }
+          log_msg(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
+        } else {
+          log_msg("-> 변동 사항 없음.")
+        }
+      } else {
+        log_msg("-> [초기화] 첫 실행. 데이터 파일 생성.")
+        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] 시스템 CURL 방식으로 초기화 완료."))
+      }
+      
+      # 파일 저장
+      write_csv(current_data, csv_file)
+      log_msg(paste("💾 데이터 파일 저장 완료:", csv_file))
+      
+    } else {
+      log_msg("❌ XML 파일은 받았으나 데이터가 비어있습니다.")
+    }
+    
+  }, error = function(e) {
+    log_msg(paste("⚠️ 파싱 에러:", e$message))
+    # 실패 원인 파악을 위해 다운로드된 내용 일부 출력
+    if(file.exists(temp_xml)) {
+      lines <- readLines(temp_xml, n = 5)
+      print(lines)
+    }
+  })
+  
 } else {
-  log_msg("❌ Final Failure: Could not fetch data. File will not be updated.")
+  log_msg("❌ CURL 다운로드 실패 (차단됨)")
 }
