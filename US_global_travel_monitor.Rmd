@@ -1,12 +1,13 @@
 ---
-title: "US Global Travel Advisory Monitor (System Curl Impersonation)"
+title: "Global Travel Safety Monitor (API Method)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load(rvest, tidyverse, telegram.bot, lubridate, stringr, readr)
+# jsonlite 패키지로 API 데이터를 처리합니다
+pacman::p_load(jsonlite, tidyverse, telegram.bot, readr, lubridate)
 
 
 TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
@@ -14,121 +15,88 @@ MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
-log_msg <- function(msg) {
-  message(paste0("[", Sys.time(), "] ", msg))
-}
+print(paste("🌍 [Global Watch]", Sys.time(), "안전 점수 API 조회 시작..."))
 
-log_msg("🌍 [Global Watch] 시스템 CURL을 이용한 정밀 타격 시작...")
+# [핵심] 미국 국무부 데이터를 기반으로 하는 오픈 API 주소
+api_url <- "[https://www.travel-advisory.info/api](https://www.travel-advisory.info/api)"
+csv_file <- "travel_status_memory.csv"
 
-# [Target] RSS가 아닌 '일반 웹페이지' (보안이 상대적으로 낮음)
-target_url <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html)"
-temp_file  <- "downloaded_page.html"
-csv_file   <- "travel_status_memory.csv"
-
-# [핵심 전략] 리눅스 시스템의 curl 명령어로 브라우저 완벽 흉내
-download_html_system <- function(url, dest) {
-  # 실제 크롬 브라우저가 보내는 헤더를 그대로 복사
-  cmd <- paste0(
-    "curl -s -L ", # 조용히(-s), 리다이렉트 추적(-L)
-    "-A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' ",
-    "-H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' ",
-    "-H 'Accept-Language: en-US,en;q=0.9' ",
-    "-H 'Cache-Control: max-age=0' ",
-    "-H 'Connection: keep-alive' ",
-    "-H 'Upgrade-Insecure-Requests: 1' ",
-    "-H 'Sec-Fetch-Dest: document' ",
-    "-H 'Sec-Fetch-Mode: navigate' ",
-    "-H 'Sec-Fetch-Site: none' ",
-    "-H 'Sec-Fetch-User: ?1' ",
-    "-o ", dest, " ",
-    "'", url, "'"
-  )
+tryCatch({
+  # 1. API 데이터 가져오기 (JSON 형식)
+  json_data <- fromJSON(api_url)
   
-  log_msg("📡 시스템 CURL 명령 실행 중...")
-  exit_code <- system(cmd)
+  # 2. 데이터 추출 및 정리 (리스트 -> 데이터프레임)
+  # API 구조가 복잡해서 purrr::map으로 정리합니다.
+  raw_list <- json_data$data
   
-  # 파일이 존재하고 용량이 1KB 이상이어야 성공
-  if (exit_code == 0 && file.exists(dest) && file.info(dest)$size > 1000) {
-    return(TRUE)
-  } else {
-    return(FALSE)
-  }
-}
-
-# --- 실행 로직 ---
-
-if (download_html_system(target_url, temp_file)) {
-  log_msg("✅ HTML 다운로드 성공! 데이터 파싱 시작.")
+  current_data <- map_dfr(raw_list, function(x) {
+    tibble(
+      Country = x$name,
+      Score = as.numeric(x$advisory$score), # 0~5점 (높을수록 위험)
+      Update_Date = as_datetime(x$advisory$updated)
+    )
+  }) %>%
+    select(Country, Score) %>%
+    arrange(desc(Score))
   
-  tryCatch({
-    # 1. 다운로드한 파일 읽기
-    page <- read_html(temp_file)
+  print(paste("✅ API 데이터 수집 성공! 총", nrow(current_data), "개국 확인."))
+
+  # 3. 과거 데이터와 비교
+  if (file.exists(csv_file)) {
+    past_data <- read_csv(csv_file, show_col_types = FALSE)
     
-    # 2. 테이블 추출 (웹페이지 구조 분석)
-    # data-table 클래스를 가진 테이블을 찾음
-    raw_table <- page %>% 
-      html_element("table") %>% 
-      html_table()
-    
-    if (nrow(raw_table) > 0) {
-      # 3. 데이터 정제
-      current_data <- raw_table %>%
-        select(Advisory, Level, Date) %>%
-        rename(Country = Advisory, Level_Text = Level, Date_Str = Date) %>%
-        mutate(
-          Country = str_remove(Country, " Travel Advisory"),
-          Level_Num = as.numeric(str_extract(Level_Text, "[0-9]")),
-          # 날짜 파싱 (예: October 20, 2023)
-          Pub_Date = mdy(Date_Str),
-          Link = target_url
-        ) %>%
-        filter(!is.na(Country) & !is.na(Level_Num))
+    # 비교 로직 (국가명 기준)
+    comparison <- current_data %>%
+      inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
+      filter(Score_new != Score_old) # 점수가 바뀐 국가만 추출
       
-      log_msg(paste("📊 추출된 국가 수:", nrow(current_data)))
-
-      # 4. 과거 데이터 비교
-      if (file.exists(csv_file)) {
-        past_data <- read_csv(csv_file, show_col_types = FALSE)
+    if (nrow(comparison) > 0) {
+      for(i in 1:nrow(comparison)) {
+        row <- comparison[i, ]
         
-        comparison <- current_data %>%
-          inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
-          filter(Level_Num_new != Level_Num_old) 
-          
-        if (nrow(comparison) > 0) {
-          for(i in 1:nrow(comparison)) {
-            row <- comparison[i, ]
-            emoji <- ifelse(row$Level_Num_new > row$Level_Num_old, "📉", "📈")
-            msg <- paste0(
-              "🇺🇸 [여행경보 변경]\n\n",
-              "🏳️ 국가: ", row$Country, "\n",
-              emoji, " 등급: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
-              "📅 날짜: ", row$Date_Str_new, "\n",
-              "🔗 확인: ", target_url
-            )
-            try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
-            Sys.sleep(1)
-          }
-          log_msg(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
+        # 점수 변화 방향 판단
+        diff <- row$Score_new - row$Score_old
+        if (diff > 0) {
+           emoji <- "📉 (악화)"
+           status_msg <- paste0("위험도 증가 (+", round(diff, 1), ")")
         } else {
-          log_msg("-> 변동 사항 없음.")
+           emoji <- "📈 (호전)"
+           status_msg <- paste0("상황 개선 (", round(diff, 1), ")")
         }
-      } else {
-        log_msg("-> [초기화] 첫 실행. 데이터 파일 생성.")
-        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] 초기화 완료 (CURL 방식)."))
+        
+        # 점수를 대략적인 Level로 변환해서 보여줌
+        level_est <- case_when(
+          row$Score_new >= 4.5 ~ "⛔ 금지 (Lv.4급)",
+          row$Score_new >= 3.5 ~ "🟠 재고 (Lv.3급)",
+          row$Score_new >= 2.5 ~ "🟡 주의 (Lv.2급)",
+          TRUE ~ "🔵 안전 (Lv.1급)"
+        )
+        
+        msg <- paste0(
+          "🌍 [국가 안전점수 변경]\n\n",
+          "🏳️ 국가: ", row$Country, "\n",
+          emoji, " 상태: ", status_msg, "\n",
+          "🔢 점수: ", row$Score_old, " ➡️ ", row$Score_new, " / 5.0\n",
+          "📊 추정 등급: ", level_est, "\n",
+          "🔗 출처: travel-advisory.info"
+        )
+        
+        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+        Sys.sleep(1)
       }
-      
-      # 파일 저장 (성공 시에만)
-      write_csv(current_data, csv_file)
-      log_msg(paste("💾 파일 저장 완료:", csv_file))
-      
+      print(paste("✅ 변경 사항", nrow(comparison), "건 알림 발송 완료."))
     } else {
-      log_msg("❌ 테이블을 찾을 수 없습니다. (웹사이트 구조 변경 가능성)")
+      print("   -> 점수 변동 사항 없음.")
     }
-    
-  }, error = function(e) {
-    log_msg(paste("⚠️ 파싱 에러:", e$message))
-  })
+  } else {
+    print("   -> [초기화] 첫 실행입니다. 기준 데이터를 저장합니다.")
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [안전 감시] 초기 데이터 수집 완료 (API 방식)."))
+  }
   
-} else {
-  log_msg("❌ CURL 다운로드 실패 (여전히 차단됨)")
-}
+  # 4. 데이터 저장 (이게 성공해야 git add 에러가 안 남)
+  write_csv(current_data, csv_file)
+  print(paste("💾 데이터 파일 저장 완료:", csv_file))
+
+}, error = function(e) {
+  print(paste("❌ 에러 발생:", e$message))
+})
