@@ -54,7 +54,7 @@ jobs:
         shell: Rscript {0}
         
       - name: Run Global Monitor Script
-        run: Rscript -e "rmarkdown::render('global_travel_monitor.Rmd')"
+        run: Rscript -e "rmarkdown::render('US_global_travel_monitor.Rmd')"
       
       # [4] Save Results (Commit & Push) with Error Handling
       - name: Commit and Push Data
