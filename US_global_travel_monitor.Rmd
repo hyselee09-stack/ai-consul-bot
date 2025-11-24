@@ -1,12 +1,12 @@
 ---
-title: "US Global Travel Advisory Monitor (Proxy Bypass)"
+title: "US Global Travel Advisory Monitor (Proxy Method)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 if (!require("pacman")) install.packages("pacman")
-# jsonlite is key here (parsing JSON from proxy)
+# [중요] jsonlite 패키지 사용 (중계 서버 데이터 처리용)
 pacman::p_load(jsonlite, tidyverse, telegram.bot, lubridate, stringr, readr)
 
 
@@ -15,45 +15,48 @@ MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
-# Logging function
+# 로그 함수
 log_msg <- function(msg) {
   message(paste0("[", Sys.time(), "] ", msg))
 }
 
-log_msg("🌍 [Global Watch] Starting Scan via Proxy...")
+log_msg("🌍 [Global Watch] 중계 서버를 통한 데이터 수집 시작...")
 
-# [핵심 전략] 직접 접속 대신 'rss2json' 중계 서버를 사용합니다.
-# 이렇게 하면 국무부는 요청자가 'GitHub'인 줄 모릅니다.
+# [핵심 전략]
+# 우리가 직접 접속하면 차단당하므로, 'rss2json.com'이라는 중계 서비스를 이용합니다.
+# 국무부 RSS 주소
 target_rss <- "[https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss](https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss)"
+# 중계 서버 주소 (무료 API)
 proxy_url  <- paste0("[https://api.rss2json.com/v1/api.json?rss_url=](https://api.rss2json.com/v1/api.json?rss_url=)", URLencode(target_rss))
 
 csv_file <- "travel_status_memory.csv"
 
-# Function to fetch data via Proxy
+# 데이터 수집 함수
 fetch_data_via_proxy <- function() {
   tryCatch({
-    # 1. 중계 서버에 요청 (JSON 형식으로 받음)
+    # 1. 중계 서버에 요청 (JSON 데이터로 옴)
     json_data <- fromJSON(proxy_url)
     
-    # 2. 상태 확인 ('ok'가 아니면 실패)
+    # 2. 응답 상태 확인
     if (json_data$status != "ok") {
-      log_msg("⚠️ Proxy returned error status.")
+      log_msg("⚠️ 중계 서버 응답 오류")
       return(NULL)
     }
     
-    # 3. 데이터 추출 (items 리스트)
-    raw_items <- json_data$items
+    # 3. 데이터 추출
+    items <- json_data$items
     
     # 4. 데이터 정리
-    clean_data <- raw_items %>%
+    clean_data <- items %>%
       select(title, link, pubDate) %>%
       rename(item_title = title, item_link = link) %>%
       mutate(
+        # 국가명 추출
         Country = str_trim(str_extract(item_title, "^.*?(?=\\s-\\sLevel)")),
+        # 레벨 숫자 추출
         Level_Num = as.numeric(str_extract(item_title, "(?<=Level\\s)[0-9]")),
-        Level_Text = str_trim(str_extract(item_title, "(?<=Level\\s).*")),
-        # RSS2JSON returns date like "2023-11-25 10:00:00"
-        Pub_Date = ymd_hms(pubDate)
+        # 레벨 텍스트 추출
+        Level_Text = str_trim(str_extract(item_title, "(?<=Level\\s).*"))
       ) %>%
       filter(!is.na(Country) & !is.na(Level_Num)) %>%
       select(Country, Level_Num, Level_Text, item_link)
@@ -61,19 +64,19 @@ fetch_data_via_proxy <- function() {
     return(clean_data)
     
   }, error = function(e) {
-    log_msg(paste("⚠️ Proxy Error:", e$message))
+    log_msg(paste("⚠️ 에러 발생:", e$message))
     return(NULL)
   })
 }
 
-# --- Execute Logic ---
+# --- 실행 로직 ---
 
 current_data <- fetch_data_via_proxy()
 
 if (!is.null(current_data) && nrow(current_data) > 0) {
-  log_msg(paste("✅ Proxy Fetch Success! Found", nrow(current_data), "items."))
+  log_msg(paste("✅ 데이터 수집 성공! 총", nrow(current_data), "개국."))
   
-  # 과거 데이터 비교 (기존 로직과 동일)
+  # 과거 데이터 비교
   if (file.exists(csv_file)) {
     past_data <- read_csv(csv_file, show_col_types = FALSE)
     
@@ -84,32 +87,38 @@ if (!is.null(current_data) && nrow(current_data) > 0) {
     if (nrow(comparison) > 0) {
       for(i in 1:nrow(comparison)) {
         row <- comparison[i, ]
-        emoji <- ifelse(row$Level_Num_new > row$Level_Num_old, "📉", "📈")
-        status_msg <- ifelse(row$Level_Num_new > row$Level_Num_old, "Risk Increased", "Situation Improved")
+        
+        if (row$Level_Num_new > row$Level_Num_old) {
+           emoji <- "📉"
+           status_msg <- "위험 증가 (Worsened)"
+        } else {
+           emoji <- "📈"
+           status_msg <- "상황 호전 (Improved)"
+        }
         
         msg <- paste0(
-          "🇺🇸 [Travel Advisory Update]\n\n",
-          "🏳️ Country: ", row$Country, "\n",
-          emoji, " Status: ", status_msg, "\n",
-          "🔢 Level: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
-          "🔗 Link: ", row$item_link_new
+          "🇺🇸 [여행경보 변경]\n\n",
+          "🏳️ 국가: ", row$Country, "\n",
+          emoji, " 상태: ", status_msg, "\n",
+          "🔢 등급: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
+          "🔗 링크: ", row$item_link_new
         )
         try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
         Sys.sleep(1)
       }
-      log_msg(paste("✅ Sent alerts for", nrow(comparison), "countries."))
+      log_msg(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
     } else {
-      log_msg("-> No changes detected.")
+      log_msg("-> 변동 사항 없음.")
     }
   } else {
-    log_msg("-> [Init] Creating initial history file.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [Travel Monitor] Proxy Init Complete."))
+    log_msg("-> [초기화] 첫 실행. 데이터 파일 생성.")
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] 초기 데이터 수집 완료 (Proxy 사용)."))
   }
   
-  # 파일 저장 (성공 시에만)
+  # 파일 저장 (성공 시에만 수행됨)
   write_csv(current_data, csv_file)
-  log_msg(paste("💾 Data saved to:", csv_file))
+  log_msg(paste("💾 파일 저장 완료:", csv_file))
 
 } else {
-  log_msg("❌ Final Failure: Proxy fetch failed.")
+  log_msg("❌ 최종 실패: 중계 서버에서도 데이터를 받지 못했습니다.")
 }
