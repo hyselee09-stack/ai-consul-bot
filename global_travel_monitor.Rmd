@@ -1,0 +1,93 @@
+---
+title: "Global Travel Advisory Monitor (With Memory)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyRSS, tidyverse, telegram.bot, lubridate, stringr, readr)
+
+
+TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
+MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
+bot <- Bot(token = TELEGRAM_BOT_TOKEN)
+
+
+# ==============================================================================
+# 글로벌 안전 등급 모니터링 (이전 기록과 비교)
+# ==============================================================================
+print(paste("🌍 [Global Watch]", Sys.time(), "여행 경보 스캔 및 비교 중..."))
+
+feed_url <- "[http://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss](http://travel.state.gov/content/travel/en/traveladvisories/traveladvisories/jcr:content/par/feed.rss)"
+csv_file <- "travel_status_memory.csv" # 기록을 저장할 파일명
+
+tryCatch({
+  # 1. 현재 데이터 수집
+  feed <- tidyRSS::tidyfeed(feed_url)
+  
+  current_data <- feed %>%
+    select(item_title, item_link) %>%
+    mutate(
+      Country = str_trim(str_extract(item_title, "^.*?(?=\\s-\\sLevel)")),
+      Level_Num = as.numeric(str_extract(item_title, "(?<=Level\\s)[0-9]")),
+      Level_Text = str_trim(str_extract(item_title, "(?<=Level\\s).*"))
+    ) %>%
+    filter(!is.na(Country) & !is.na(Level_Num)) %>%
+    select(Country, Level_Num, Level_Text, item_link)
+
+  # 2. 과거 데이터 불러오기 (CSV 파일이 있으면 읽음)
+  if (file.exists(csv_file)) {
+    past_data <- read_csv(csv_file, show_col_types = FALSE)
+    
+    # 3. 비교 로직 (Join)
+    comparison <- current_data %>%
+      inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
+      filter(Level_Num_new != Level_Num_old) # 등급 숫자가 바뀐 것만 추출
+      
+    # 4. 변화 감지 및 알림
+    if (nrow(comparison) > 0) {
+      
+      for(i in 1:nrow(comparison)) {
+        row <- comparison[i, ]
+        
+        # 변화 방향 판단
+        if (row$Level_Num_new > row$Level_Num_old) {
+          status <- "🚨 위험 증가 (Worsened)"
+          emoji <- "📉"
+        } else {
+          status. <- "✅ 상황 호전 (Improved)"
+          emoji <- "📈"
+        }
+        
+        msg <- paste0(
+          "🇺🇸 [여행경보 변경 감지]\n\n",
+          "🏳️ 국가: ", row$Country, "\n",
+          emoji, " 상태: ", status, "\n",
+          "🔢 등급 변화: Lv.", row$Level_Num_old, " ➡️ Lv.", row$Level_Num_new, "\n",
+          "📝 내용: ", row$Level_Text_new, "\n",
+          "🔗 상세: ", row$item_link_new
+        )
+        
+        try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+        Sys.sleep(1)
+      }
+      print(paste("✅ 변경 사항", nrow(comparison), "건 알림 전송 완료"))
+      
+    } else {
+      print("   -> 등급 변동 사항 없음.")
+    }
+    
+  } else {
+    print("   -> [초기화] 과거 데이터 파일이 없습니다. 새로 생성합니다.")
+  }
+  
+  # 5. 현재 데이터를 파일로 저장 (다음 실행을 위해 업데이트)
+  write_csv(current_data, csv_file)
+  print(paste("💾 현재 상태 저장 완료:", csv_file))
+
+}, error = function(e) {
+  print(paste("Error:", e$message))
+})
+
+
