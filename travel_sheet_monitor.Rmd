@@ -1,0 +1,83 @@
+---
+title: "Travel Monitor via Google Sheets"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(googlesheets4, tidyverse, telegram.bot, lubridate, stringr)
+
+
+TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
+MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
+bot <- Bot(token = TELEGRAM_BOT_TOKEN)
+
+
+# ==============================================================================
+# 구글 시트 연동 여행경보 모니터링
+# ==============================================================================
+print(paste("📊 [Sheet Monitor]", Sys.time(), "구글 시트 데이터 확인 중..."))
+
+# 1. 구글 시트 주소 (본인의 시트 주소로 교체하세요!)
+sheet_url <- "[https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit](https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID_HERE/edit)"
+
+# [핵심] 인증 없이 읽기 모드로 설정 (공유 링크가 있어야 함)
+gs4_deauth()
+
+tryCatch({
+  # 2. 데이터 읽기
+  # IFTTT가 채우는 시트는 헤더가 없을 수 있으므로 col_names = FALSE
+  raw_data <- read_sheet(sheet_url, col_names = FALSE)
+  
+  # 3. 데이터 정리 (IFTTT 포맷에 따라 다를 수 있음)
+  # 가정: A열=제목(국가+레벨), B열=링크, C열=날짜
+  clean_data <- raw_data %>%
+    rename(Title = ...1, Link = ...2, Date_Str = ...3) %>%
+    mutate(
+      # 날짜 파싱 (IFTTT 날짜 형식에 맞춰 수정 필요할 수 있음)
+      # 예: "November 24, 2025 at 10:30PM" -> mdy_hm() 등이 필요
+      # 여기서는 단순히 시스템 시간과 비교하기 위해 최근 상위 행만 봅니다.
+      Row_Index = row_number()
+    ) %>%
+    head(10) # 최신 10개만 분석
+
+  # 4. "새로운 정보" 판단 로직
+  # (가장 간단한 방법: 최근 24시간 내 실행된 적이 있다면, 상위 N개가 새 글일 것임)
+  # 여기서는 "오늘 날짜"가 포함된 데이터가 있는지 텍스트로 검색합니다.
+  
+  today_pattern <- format(Sys.time(), "%B %d, %Y") # 예: November 25, 2025
+  
+  new_entries <- clean_data %>%
+    filter(str_detect(Date_Str, today_pattern)) # 날짜 텍스트 매칭
+    
+  if (nrow(new_entries) > 0) {
+    print(paste("✅ 오늘 날짜(", today_pattern, ") 데이터 발견:", nrow(new_entries), "건"))
+    
+    for(i in 1:nrow(new_entries)) {
+      title <- new_entries$Title[i]
+      link  <- new_entries$Link[i]
+      
+      # 국가명과 레벨 추출
+      country <- str_extract(title, "^.*?(?=\\s-\\sLevel)")
+      level   <- str_extract(title, "Level [1-4]")
+      
+      msg <- paste0(
+        "🇺🇸 [구글시트 감지 알림]\n\n",
+        "🏳️ 국가: ", country, "\n",
+        "📢 등급: ", level, "\n",
+        "🔗 링크: ", link
+      )
+      
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+      Sys.sleep(1)
+    }
+  } else {
+    print("   -> 오늘 날짜로 업데이트된 내역 없음.")
+    # 생존 신고
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [구글시트 점검] 오늘 추가된 여행 경보 없음."))
+  }
+
+}, error = function(e) {
+  print(paste("❌ 구글 시트 읽기 실패:", e$message))
+})
