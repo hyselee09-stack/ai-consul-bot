@@ -17,7 +17,7 @@ bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 print(paste("📊 [Sheet Monitor]", Sys.time(), "구글 시트 데이터(IMPORTFEED) 확인 중..."))
 
 # [중요] IMPORTFEED 함수가 적힌 구글 시트 주소
-sheet_url <- "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit"
+sheet_url <- "https://docs.google.com/spreadsheets/d/1YyHqTxOSQc4vyZbC5BlzOG_CZyXqSt7YrnrtXi5AxxY/edit?gid=0#gid=0"
 csv_file  <- "travel_status_memory.csv"
 
 # 인증 없이 읽기 모드
