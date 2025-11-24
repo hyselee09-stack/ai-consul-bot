@@ -1,0 +1,114 @@
+---
+title: "Global Travel Monitor (System Curl Strategy)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(jsonlite, tidyverse, telegram.bot, readr, lubridate)
+
+
+TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
+MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
+bot <- Bot(token = TELEGRAM_BOT_TOKEN)
+
+
+print(paste("🌍 [Global Watch]", Sys.time(), "시스템 다운로드 방식으로 데이터 수집 시작..."))
+
+# 미국 국무부 데이터를 미러링하는 오픈 API
+api_url <- "[https://www.travel-advisory.info/api](https://www.travel-advisory.info/api)"
+temp_file <- "temp_api_data.json" # 임시로 저장할 파일명
+csv_file <- "travel_status_memory.csv"
+
+# [핵심 전략] R 패키지 대신 시스템 명령어(curl)로 강제 다운로드
+# -L: 리다이렉트 추적, -k: 보안경고 무시, -H: 브라우저인 척 위장
+download_cmd <- paste0("curl -L -k -s -H 'User-Agent: Mozilla/5.0' -o ", temp_file, " '", api_url, "'")
+
+# 1. 시스템 명령어로 파일 다운로드 실행
+exit_code <- system(download_cmd)
+
+# 2. 파일이 잘 받아졌는지 확인 (용량이 100바이트 이상이어야 함)
+if (exit_code == 0 && file.exists(temp_file) && file.info(temp_file)$size > 100) {
+  print("✅ JSON 파일 다운로드 성공! 데이터 분석 시작.")
+  
+  tryCatch({
+    # 3. 다운로드된 파일 읽기
+    json_data <- fromJSON(temp_file)
+    
+    # 4. 데이터 정리
+    raw_data <- json_data$data
+    
+    current_data <- map_dfr(raw_data, function(x) {
+      tibble(
+        Country = x$name,
+        Score = as.numeric(x$advisory$score),
+        Update_Date = as_datetime(x$advisory$updated)
+      )
+    }) %>%
+      select(Country, Score) %>%
+      filter(!is.na(Score))
+    
+    print(paste("📊 데이터 파싱 완료. 총", nrow(current_data), "개국 확인."))
+
+    # 5. 과거 데이터 비교
+    if (file.exists(csv_file)) {
+      past_data <- read_csv(csv_file, show_col_types = FALSE)
+      
+      comparison <- current_data %>%
+        inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
+        filter(Score_new != Score_old)
+        
+      if (nrow(comparison) > 0) {
+        for(i in 1:nrow(comparison)) {
+          row <- comparison[i, ]
+          diff <- row$Score_new - row$Score_old
+          
+          if (diff > 0) {
+             emoji <- "📉 (악화)"
+             status_msg <- paste0("위험도 증가 (+", round(diff, 1), ")")
+          } else {
+             emoji <- "📈 (호전)"
+             status_msg <- paste0("상황 개선 (", round(diff, 1), ")")
+          }
+          
+          # 레벨 추정
+          level_est <- case_when(
+            row$Score_new >= 4.5 ~ "⛔ 금지 (Lv.4)",
+            row$Score_new >= 3.5 ~ "🟠 재고 (Lv.3)",
+            row$Score_new >= 2.5 ~ "🟡 주의 (Lv.2)",
+            TRUE ~ "🔵 안전 (Lv.1)"
+          )
+          
+          msg <- paste0(
+            "🌍 [안전점수 변경]\n\n",
+            "🏳️ 국가: ", row$Country, "\n",
+            emoji, " 상태: ", status_msg, "\n",
+            "🔢 점수: ", row$Score_old, " ➡️ ", row$Score_new, " / 5.0\n",
+            "📊 추정: ", level_est, "\n",
+            "🔗 출처: travel-advisory.info"
+          )
+          
+          try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
+          Sys.sleep(1)
+        }
+        print(paste("✅ 알림 전송 완료:", nrow(comparison), "건"))
+      } else {
+        print("   -> 점수 변동 사항 없음.")
+      }
+    } else {
+      print("   -> [초기화] 첫 실행. 기준 데이터 저장.")
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [여행경보] 시스템 CURL 방식으로 초기화 완료."))
+    }
+    
+    # 6. 파일 저장 (이게 성공해야 git add가 됨)
+    write_csv(current_data, csv_file)
+    print(paste("💾 데이터 저장 완료:", csv_file))
+    
+  }, error = function(e) {
+    print(paste("❌ 파싱 에러:", e$message))
+  })
+  
+} else {
+  print("❌ 최종 실패: CURL 다운로드조차 실패했습니다. (네트워크 차단)")
+}
