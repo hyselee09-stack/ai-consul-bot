@@ -1,111 +1,200 @@
-#### (2) `major_disaster_monitor_sw_usa.Rmd` (대형 재난용)
-> **역할:** 산불, 지진, 총기 난사 등 대형 공공 안전 위협 감시
-
-```markdown
 ---
-title: "Major Disaster Monitor (SW USA)"
+title: "Major Disaster & Incident Monitor (SW USA)"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+# Load necessary packages
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(httr, jsonlite, tidyRSS, tidyverse, telegram.bot, rvest, lubridate, purrr)
 
 
+# ==============================================================================
+# 2. Security Settings: Retrieve Secrets from GitHub Environment
+# ==============================================================================
 GEMINI_API_KEY     <- Sys.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN <- Sys.getenv("TELEGRAM_BOT_TOKEN")
 MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 MODEL_NAME         <- "gemini-2.5-flash"
+
+# Initialize Telegram Bot
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
+# ==============================================================================
+# 3. Helper Functions
+# ==============================================================================
+
+# [Function 1] Direct Gemini API Call (Manual Request to avoid package errors)
 ask_gemini_direct <- function(prompt) {
   url <- paste0("[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)", MODEL_NAME, ":generateContent?key=", GEMINI_API_KEY)
-  body_data <- list(contents = list(list(parts = list(list(text = prompt)))))
+  
+  body_data <- list(
+    contents = list(list(parts = list(list(text = prompt))))
+  )
+  
   tryCatch({
-    response <- POST(url, add_headers("Content-Type" = "application/json"), body = toJSON(body_data, auto_unbox = TRUE))
+    response <- POST(
+      url, 
+      add_headers("Content-Type" = "application/json"), 
+      body = toJSON(body_data, auto_unbox = TRUE)
+    )
+    
     if (status_code(response) == 200) {
       result_json <- fromJSON(content(response, "text", encoding = "UTF-8"))
       return(result_json$candidates$content$parts[[1]]$text)
-    } else { return(NULL) }
-  }, error = function(e) { return(NULL) })
+    } else {
+      print(paste("⚠️ API Error Code:", status_code(response)))
+      return(NULL)
+    }
+  }, error = function(e) {
+    print("⚠️ Failed to communicate with Gemini API")
+    return(NULL)
+  })
 }
 
+# [Function 2] Scrape Full Article Text
+# Fetches the content of <p> tags to provide more context than just the title.
 get_full_text <- function(link) {
   tryCatch({
-    page <- read_html(link, options = "NO_ERROR")
+    # Set timeout option to prevent hanging
+    page <- read_html(link, options = "NO_ERROR") 
+    
+    # Extract text from paragraph tags
     text <- page %>% html_nodes("p") %>% html_text() %>% paste(collapse = " ")
+    
+    # Return NULL if text is too short, otherwise return first 2000 chars
     if (nchar(text) < 100) return(NULL)
     return(substr(text, 1, 2000))
-  }, error = function(e) { return(NULL) })
+    
+  }, error = function(e) {
+    return(NULL) # Fail silently and use summary instead
+  })
 }
 
+# [Function 3] Fetch News (Integrated Disaster Keywords)
 fetch_news <- function() {
-  # 대형 재난 키워드 (4개 주)
-  base_url <- "[https://news.google.com/rss/search?q=(California+OR+Nevada+OR+Arizona+OR+%22New+Mexico%22)+(wildfire+OR+earthquake+OR+flood+OR+%22mass+shooting%22+OR+%22active+shooter%22+OR+explosion+OR+%22state+of+emergency%22+OR+evacuation)+when:1h&ceid=US:en&hl=en-US&gl=US](https://news.google.com/rss/search?q=(California+OR+Nevada+OR+Arizona+OR+%22New+Mexico%22)+(wildfire+OR+earthquake+OR+flood+OR+%22mass+shooting%22+OR+%22active+shooter%22+OR+explosion+OR+%22state+of+emergency%22+OR+evacuation)+when:1h&ceid=US:en&hl=en-US&gl=US)"
+  # Query: 4 States + (Wildfire, Earthquake, Flood, Shooting, Evacuation, Emergency)
+  # when:1h (Latest 1 hour)
+  query <- "(California OR Nevada OR Arizona OR \"New Mexico\") AND (Wildfire OR Earthquake OR Flood OR \"Flash Flood\" OR \"Mass Shooting\" OR \"Active Shooter\" OR Evacuation OR \"State of Emergency\")"
+  
+  base_url <- paste0(
+    "[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=)", URLencode(query),
+    "&ceid=US:en&hl=en-US&gl=US&when:1h"
+  )
   
   tryCatch({
     feed <- tidyRSS::tidyfeed(base_url)
     if (nrow(feed) > 0) {
-      feed %>% select(item_title, item_link, item_description, item_pub_date) %>% head(7)
+      feed %>% 
+        select(item_title, item_link, item_description, item_pub_date) %>% 
+        head(7) # Limit to 7 items to prevent API overflow
     } else { NULL }
   }, error = function(e) { return(NULL) })
 }
 
 
-print(paste("📡 [Disaster Monitor]", Sys.time(), "재난 스캔 중"))
+# ==============================================================================
+# 4. Main Execution Logic
+# ==============================================================================
+print(paste("📡 [Disaster Monitor]", Sys.time(), "Scanning for Major Incidents..."))
+
 news_data <- fetch_news()
 alert_count <- 0
 
 if (is.null(news_data) || nrow(news_data) == 0) {
-  try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [재난 감시] 특이사항 없음."))
+  print("   -> No news found.")
+  # Heartbeat message (Optional: verify system is alive)
+  try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [Safety Check] No major incidents in 4 states."))
+  
 } else {
+  
+  # [Filter] Keep articles published within the last 40 minutes to avoid duplicates
   current_time <- Sys.time()
   news_data <- news_data %>%
     mutate(pub_date_parsed = ymd_hms(item_pub_date)) %>%
     filter(pub_date_parsed >= (current_time - minutes(40)))
   
   if (nrow(news_data) > 0) {
+    print(paste("   -> Analyzing", nrow(news_data), "new articles."))
+    
     for(i in 1:nrow(news_data)) {
-      title <- news_data$item_title[i]; link <- news_data$item_link[i]; desc <- news_data$item_description[i]
-      full_text <- get_full_text(link)
-      content_src <- if(is.null(full_text)) gsub("<.*?>", "", desc) else full_text
+      title <- news_data$item_title[i]
+      link  <- news_data$item_link[i]
+      desc  <- news_data$item_description[i]
       
+      # Attempt to scrape full text
+      full_text <- get_full_text(link)
+      
+      if (is.null(full_text)) {
+        content_src <- gsub("<.*?>", "", desc) # Clean HTML tags
+      } else {
+        content_src <- full_text
+      }
+      
+      # Construct Prompt for Gemini
       prompt <- paste0(
         "Analyze this news.\n Title: ", title, "\n Content: ", content_src, "\n\n",
+        
         "YOUR TASK: Determine if this is a 'MAJOR PUBLIC SAFETY THREAT' in CA, NV, AZ, or NM.\n",
-        "CRITERIA for 'MAJOR':\n 1. Mass Shooting (3+ victims)\n 2. Large Disaster (Wildfire, Earthquake > 4.5, Flood)\n 3. Major Accident (Plane/Train)\n 4. IGNORE minor fires/crimes.\n",
-        "OUTPUT: 'Major: [Yes/No] | Type: [Fire/Shooting/Natural/Other] | Severity: [High/Medium] | Summary: [1 sentence Korean]'"
+        
+        "CRITERIA for 'MAJOR' (Must be severe):\n",
+        "1. Wildfire: Triggering evacuations or burning structures (Ignore small brush fires).\n",
+        "2. Earthquake: Magnitude 4.5+ or causing damage.\n",
+        "3. Mass Shooting: 3+ victims or Active Shooter situations.\n",
+        "4. Weather: Flash floods, severe storms causing damage.\n",
+        "5. IGNORE: Minor house fires, car accidents, politics, general weather forecasts.\n\n",
+        
+        "OUTPUT FORMAT (Strictly):\n",
+        "'Major: [Yes/No] | Type: [Fire/Quake/Shoot/Flood/Other] | Severity: [High/Medium] | Summary: [1 sentence in English]'"
       )
       
+      # API Call
       Sys.sleep(4)
       analysis <- ask_gemini_direct(prompt)
       
+      # Process Result
       if (!is.null(analysis) && str_detect(analysis, "Major: Yes")) {
-        summary <- str_extract(analysis, "(?<=Summary: ).*")
+        
+        summary  <- str_extract(analysis, "(?<=Summary: ).*")
         type_raw <- str_extract(analysis, "(?<=Type: ).*(?=\\| Severity)")
         severity <- str_extract(analysis, "(?<=Severity: ).*(?=\\| Summary)")
         
+        # Map Emojis based on type
         emoji <- case_when(
           str_detect(type_raw, "Fire") ~ "🔥",
-          str_detect(type_raw, "Shooting") ~ "🔫",
-          str_detect(type_raw, "Natural") ~ "🌊",
+          str_detect(type_raw, "Shoot") ~ "🔫",
+          str_detect(type_raw, "Quake") ~ "🌋",
+          str_detect(type_raw, "Flood") ~ "🌊",
           TRUE ~ "🚨"
         )
-        msg <- paste0(emoji, " [재난 속보] ", type_raw, "\n\n⚡ 등급: ", severity, "\n📌 제목: ", title, "\n📝 내용: ", summary, "\n🔗 링크: ", link)
-        try({
+        
+        # Compose Message
+        msg <- paste0(
+          emoji, " [URGENT ALERT] ", type_raw, "\n\n",
+          "⚡ Severity: ", severity, "\n",
+          "📌 Title: ", title, "\n",
+          "📝 Summary: ", summary, "\n",
+          "🔗 Link: ", link
+        )
+        
+        tryCatch({
           bot$sendMessage(chat_id = MY_CHAT_ID, text = msg)
+          print(paste("✅ Alert Sent:", title))
           alert_count <- alert_count + 1
-        })
+        }, error = function(e) { print("Failed to send Telegram message") })
       }
     }
+    
+    # If articles were found but none were 'Major'
     if (alert_count == 0) {
-      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = paste0("✅ [재난 감시] ", nrow(news_data), "건 확인. 대형 재난 없음.")))
+      safe_msg <- paste0("✅ [Safety Check] Checked ", nrow(news_data), " articles. No major threats found.")
+      try(bot$sendMessage(chat_id = MY_CHAT_ID, text = safe_msg))
     }
+
   } else {
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [재난 감시] 최근 40분 내 새 뉴스 없음."))
+    print("   -> No new articles in the last 40 minutes.")
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [Safety Check] No new news in the last 40 mins."))
   }
 }
-
-
