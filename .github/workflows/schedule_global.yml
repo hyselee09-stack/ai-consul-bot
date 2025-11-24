@@ -1,4 +1,4 @@
-name: Global Travel Monitor Schedule
+name: US Global Travel Monitor Schedule
 
 on:
   schedule:
