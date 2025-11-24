@@ -1,0 +1,32 @@
+name: Korean Monitor Schedule
+
+on:
+  schedule:
+    - cron: '5,35 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-korean-monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      - uses: r-lib/actions/setup-r@v2
+      - uses: r-lib/actions/setup-pandoc@v2
+      
+      - name: Install Linux Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
+        
+      - name: Install R Packages
+        run: |
+          install.packages(c("rmarkdown", "pacman", "httr", "jsonlite", "tidyRSS", "tidyverse", "telegram.bot", "rvest", "lubridate", "purrr"), repos = "https://cloud.r-project.org")
+        shell: Rscript {0}
+        
+      - name: Run Korean Monitor
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }}
+        run: Rscript -e "rmarkdown::render('consular_protection_monitor_ca_usa.Rmd')"
