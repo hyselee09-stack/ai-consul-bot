@@ -6,7 +6,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 if (!require("pacman")) install.packages("pacman")
-# jsonlite 패키지로 API 데이터를 처리합니다
+# [Key Package] jsonlite is required to parse data from the API
 pacman::p_load(jsonlite, tidyverse, telegram.bot, readr, lubridate)
 
 
@@ -15,88 +15,89 @@ MY_CHAT_ID         <- Sys.getenv("MY_CHAT_ID")
 bot <- Bot(token = TELEGRAM_BOT_TOKEN)
 
 
-print(paste("🌍 [Global Watch]", Sys.time(), "안전 점수 API 조회 시작..."))
+print(paste("🌍 [Global Watch]", Sys.time(), "Starting API Scan..."))
 
-# [핵심] 미국 국무부 데이터를 기반으로 하는 오픈 API 주소
+# [STRATEGY CHANGE] Use the open API which mirrors State Dept data
+# This avoids IP blocking issues.
 api_url <- "[https://www.travel-advisory.info/api](https://www.travel-advisory.info/api)"
 csv_file <- "travel_status_memory.csv"
 
 tryCatch({
-  # 1. API 데이터 가져오기 (JSON 형식)
+  # 1. Fetch Data from API (JSON format)
   json_data <- fromJSON(api_url)
   
-  # 2. 데이터 추출 및 정리 (리스트 -> 데이터프레임)
-  # API 구조가 복잡해서 purrr::map으로 정리합니다.
+  # 2. Process Data (Convert complex list to Data Frame)
+  # The API returns a score (0-5). Higher is more dangerous.
   raw_list <- json_data$data
   
   current_data <- map_dfr(raw_list, function(x) {
     tibble(
       Country = x$name,
-      Score = as.numeric(x$advisory$score), # 0~5점 (높을수록 위험)
+      Score = as.numeric(x$advisory$score), # 0 (Safe) to 5 (Dangerous)
       Update_Date = as_datetime(x$advisory$updated)
     )
   }) %>%
     select(Country, Score) %>%
     arrange(desc(Score))
   
-  print(paste("✅ API 데이터 수집 성공! 총", nrow(current_data), "개국 확인."))
+  print(paste("✅ API Fetch Success! Checked", nrow(current_data), "countries."))
 
-  # 3. 과거 데이터와 비교
+  # 3. Compare with Previous Data
   if (file.exists(csv_file)) {
     past_data <- read_csv(csv_file, show_col_types = FALSE)
     
-    # 비교 로직 (국가명 기준)
+    # Logic: Compare Scores
     comparison <- current_data %>%
       inner_join(past_data, by = "Country", suffix = c("_new", "_old")) %>%
-      filter(Score_new != Score_old) # 점수가 바뀐 국가만 추출
+      filter(Score_new != Score_old) # Filter changed scores
       
     if (nrow(comparison) > 0) {
       for(i in 1:nrow(comparison)) {
         row <- comparison[i, ]
         
-        # 점수 변화 방향 판단
+        # Determine Direction
         diff <- row$Score_new - row$Score_old
         if (diff > 0) {
-           emoji <- "📉 (악화)"
-           status_msg <- paste0("위험도 증가 (+", round(diff, 1), ")")
+           emoji <- "📉 (Worsened)"
+           status_msg <- paste0("Risk Increased (+", round(diff, 1), ")")
         } else {
-           emoji <- "📈 (호전)"
-           status_msg <- paste0("상황 개선 (", round(diff, 1), ")")
+           emoji <- "📈 (Improved)"
+           status_msg <- paste0("Situation Improved (", round(diff, 1), ")")
         }
         
-        # 점수를 대략적인 Level로 변환해서 보여줌
+        # Estimate Level based on Score
         level_est <- case_when(
-          row$Score_new >= 4.5 ~ "⛔ 금지 (Lv.4급)",
-          row$Score_new >= 3.5 ~ "🟠 재고 (Lv.3급)",
-          row$Score_new >= 2.5 ~ "🟡 주의 (Lv.2급)",
-          TRUE ~ "🔵 안전 (Lv.1급)"
+          row$Score_new >= 4.5 ~ "⛔ Do Not Travel (Lv.4)",
+          row$Score_new >= 3.5 ~ "🟠 Reconsider (Lv.3)",
+          row$Score_new >= 2.5 ~ "🟡 Caution (Lv.2)",
+          TRUE ~ "🔵 Normal (Lv.1)"
         )
         
         msg <- paste0(
-          "🌍 [국가 안전점수 변경]\n\n",
-          "🏳️ 국가: ", row$Country, "\n",
-          emoji, " 상태: ", status_msg, "\n",
-          "🔢 점수: ", row$Score_old, " ➡️ ", row$Score_new, " / 5.0\n",
-          "📊 추정 등급: ", level_est, "\n",
-          "🔗 출처: travel-advisory.info"
+          "🌍 [Safety Score Update]\n\n",
+          "🏳️ Country: ", row$Country, "\n",
+          emoji, " Status: ", status_msg, "\n",
+          "🔢 Score: ", row$Score_old, " ➡️ ", row$Score_new, " / 5.0\n",
+          "📊 Est. Level: ", level_est, "\n",
+          "🔗 Source: travel-advisory.info"
         )
         
         try(bot$sendMessage(chat_id = MY_CHAT_ID, text = msg))
         Sys.sleep(1)
       }
-      print(paste("✅ 변경 사항", nrow(comparison), "건 알림 발송 완료."))
+      print(paste("✅ Sent alerts for", nrow(comparison), "changed countries."))
     } else {
-      print("   -> 점수 변동 사항 없음.")
+      print("   -> No score changes detected.")
     }
   } else {
-    print("   -> [초기화] 첫 실행입니다. 기준 데이터를 저장합니다.")
-    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [안전 감시] 초기 데이터 수집 완료 (API 방식)."))
+    print("   -> [Init] First run. Saving baseline data.")
+    try(bot$sendMessage(chat_id = MY_CHAT_ID, text = "✅ [Travel Monitor] Initial API data collected."))
   }
   
-  # 4. 데이터 저장 (이게 성공해야 git add 에러가 안 남)
+  # 4. Save Data (Crucial for the YAML commit step)
   write_csv(current_data, csv_file)
-  print(paste("💾 데이터 파일 저장 완료:", csv_file))
+  print(paste("💾 Data saved to:", csv_file))
 
 }, error = function(e) {
-  print(paste("❌ 에러 발생:", e$message))
+  print(paste("❌ Error:", e$message))
 })
