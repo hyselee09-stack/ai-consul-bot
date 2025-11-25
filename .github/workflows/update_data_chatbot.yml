@@ -51,6 +51,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: 'CI: Auto update G4K knowledge base [skip ci]'
-          files: |
+          # ⭐⭐⭐ 이 부분을 수정해야 합니다: 'files' -> 'file_pattern' ⭐⭐⭐
+          file_pattern: | 
             final_chatbot_knowledge.csv
-            update_knowledge.csv # G4K 데이터가 갱신되면 이 파일도 같이 커밋됩니다.
+            update_knowledge.R
