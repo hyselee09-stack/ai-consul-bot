@@ -8,7 +8,7 @@ library(stringr)
 
 # --- 1. 환경 변수 로드 (GitHub Secrets에서 가져옴) ---
 telegram_token <- Sys.getenv("TELEGRAM_BOT_TOKEN") 
-telegram_chat_id <- Sys.getenv("TELEGRAM_CHAT_ID")
+telegram_chat_id <- Sys.getenv("MY_CHAT_ID") # ⭐⭐⭐ 이 부분을 "MY_CHAT_ID"로 변경 ⭐⭐⭐
 g4k_url <- "https://www.g4k.go.kr/cipp/0200/selectCIPP0201.do?cffdnCd=CIPOK00049"
 
 
