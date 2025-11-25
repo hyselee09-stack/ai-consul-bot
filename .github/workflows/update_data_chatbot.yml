@@ -1,0 +1,40 @@
+name: Daily Knowledge Base Update and Telegram Notify
+
+on:
+  schedule:
+    # 매일 새벽 4시 (UTC 기준 오후 7시) 실행
+    - cron: '0 19 * * *' 
+  workflow_dispatch: # 수동 실행을 위한 버튼 추가
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.2' # 사용 가능한 안정적인 R 버전 지정
+
+      - name: Install dependencies
+        run: |
+          install.packages(c("httr", "rvest", "dplyr", "stringr", "xml2"))
+        shell: Rscript {0}
+
+      - name: Run R script to update data
+        run: Rscript update_knowledge.R
+
+      - name: Commit and Push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          # R 스크립트가 갱신한 CSV 파일과 기존 R 스크립트를 커밋합니다.
+          commit_message: 'CI: Auto update G4K knowledge base [skip ci]'
+          files: |
+            final_chatbot_knowledge.csv
+            update_knowledge.R
