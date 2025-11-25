@@ -10,13 +10,12 @@ jobs:
   update-data:
     runs-on: ubuntu-latest
     
-    # ⭐⭐ 최종 해결: 403 권한 거부 문제 해결 ⭐⭐
     permissions:
       contents: write # 깃허브 봇에게 CSV 파일 갱신 권한을 부여
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      MY_CHAT_ID: ${{ secrets.MY_CHAT_ID }} # ⭐⭐⭐ 수정된 Secret 이름 적용 ⭐⭐⭐
       R_VERSION: '4.5' # 버전 불일치 에러 해결
       
     steps:
@@ -28,30 +27,30 @@ jobs:
         with:
           r-version: ${{ env.R_VERSION }}
 
-      # ⭐⭐ R 패키지 캐시 (속도 최적화) ⭐⭐
+      # R 패키지 캐시 (속도 최적화)
       - name: Cache R packages
         uses: actions/cache@v3
         with:
           path: ${{ env.R_LIBS_USER }}
-          # R 버전과 OS를 키로 사용하여 캐시
           key: ${{ runner.os }}-r-${{ env.R_VERSION }}-${{ hashFiles('renv.lock', 'DESCRIPTION') }}
           restore-keys: |
             ${{ runner.os }}-r-
 
       - name: Install dependencies
-        # 패키지 설치 오류 수정: R -e '...' 명령으로 안정적으로 설치
         run: |
           R -e 'install.packages(c("httr", "rvest", "dplyr", "stringr", "xml2"), repos = "https://cloud.r-project.org/")'
         shell: bash
 
       - name: Run R script to update data
         run: Rscript update_knowledge.R
+        env:
+          # ⭐⭐ R 스크립트 내부 환경 변수도 수정 (MY_CHAT_ID로 전달) ⭐⭐
+          TELEGRAM_CHAT_ID: ${{ env.MY_CHAT_ID }} 
 
       - name: Commit and Push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: 'CI: Auto update G4K knowledge base [skip ci]'
-          # ⭐⭐⭐ 이 부분을 수정해야 합니다: 'files' -> 'file_pattern' ⭐⭐⭐
-          file_pattern: | 
+          file_pattern: |
             final_chatbot_knowledge.csv
             update_knowledge.R
