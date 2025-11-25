@@ -9,10 +9,15 @@ on:
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    
+    # ⭐⭐ 최종 해결: 403 권한 거부 문제 해결 ⭐⭐
+    permissions:
+      contents: write # 깃허브 봇에게 CSV 파일 갱신 권한을 부여
+
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      R_VERSION: '4.5'
+      R_VERSION: '4.5' # 버전 불일치 에러 해결
       
     steps:
       - name: Checkout repository
@@ -23,7 +28,7 @@ jobs:
         with:
           r-version: ${{ env.R_VERSION }}
 
-      # ⭐⭐⭐ 깃허브 캐시 설정 (속도 최적화) ⭐⭐⭐
+      # ⭐⭐ R 패키지 캐시 (속도 최적화) ⭐⭐
       - name: Cache R packages
         uses: actions/cache@v3
         with:
@@ -34,7 +39,7 @@ jobs:
             ${{ runner.os }}-r-
 
       - name: Install dependencies
-        # ⭐⭐⭐ 설치 오류 수정 코드 ⭐⭐⭐
+        # 패키지 설치 오류 수정: R -e '...' 명령으로 안정적으로 설치
         run: |
           R -e 'install.packages(c("httr", "rvest", "dplyr", "stringr", "xml2"), repos = "https://cloud.r-project.org/")'
         shell: bash
@@ -48,4 +53,4 @@ jobs:
           commit_message: 'CI: Auto update G4K knowledge base [skip ci]'
           files: |
             final_chatbot_knowledge.csv
-            update_knowledge.R
+            update_knowledge.csv # G4K 데이터가 갱신되면 이 파일도 같이 커밋됩니다.
