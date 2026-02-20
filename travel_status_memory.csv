@@ -1,4 +1,6 @@
 Country,Level_Num,Level_Text,Link
+Greece,1,1: Exercise Normal Precautions,"Thu, 23 Oct 2025"
+Ecuador,2,2: Exercise Increased Caution,"Tue, 14 Oct 2025"
 Slovakia,1,1: Exercise Normal Precautions,"Thu, 12 Feb 2026"
 Yemen,4,4: Do Not Travel,"Fri, 19 Dec 2025"
 Uzbekistan,1,1: Exercise Normal Precautions,"Mon, 26 Jan 2026"
@@ -247,5 +249,3 @@ French Polynesia,1,1: Exercise Normal Precautions,"Mon, 02 Dec 2024"
 Argentina,1,1: Exercise Normal Precautions,"Fri, 20 Sep 2024"
 French West Indies,1,1: Exercise Normal Precautions,"Thu, 22 Aug 2024"
 Ethiopia,3,3: Reconsider Travel,"Mon, 31 Jul 2023"
-Egypt,2,2: Exercise Increased Caution,"Tue, 15 Jul 2025"
-South Korea,1,1: Exercise Normal Precautions,"Wed, 28 May 2025"
